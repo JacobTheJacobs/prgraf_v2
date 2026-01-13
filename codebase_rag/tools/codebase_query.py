@@ -25,6 +25,7 @@ def create_query_tool(
     ingestor: QueryProtocol,
     cypher_gen: CypherGenerator,
     console: Console | None = None,
+    project_name: str | None = None,
 ) -> Tool:
     if console is None:
         console = Console(width=None, force_terminal=True)
@@ -33,11 +34,19 @@ def create_query_tool(
         natural_language_query: str,
     ) -> QueryGraphData:
         logger.info(ls.TOOL_QUERY_RECEIVED.format(query=natural_language_query))
+
+        # Inject project context if available
+        final_query = natural_language_query
+        if project_name:
+            final_query = f"Context: Filter results to Project '{project_name}' only. Query: {natural_language_query}"
+
         cypher_query = QUERY_NOT_AVAILABLE
         try:
-            cypher_query = await cypher_gen.generate(natural_language_query)
+            cypher_query = await cypher_gen.generate(final_query)
 
-            results = ingestor.fetch_all(cypher_query)
+            # Ensure connection is active
+            with ingestor:
+                results = ingestor.fetch_all(cypher_query)
 
             if results:
                 table = Table(

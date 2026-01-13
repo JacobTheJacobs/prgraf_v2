@@ -136,6 +136,70 @@ class RepoFetcher:
             logger.error(f"⚠️ Failed to fetch PR changes: {e}")
             return []
 
+    def fetch_pr_metadata(self, repo_path: Path, pr_number: int) -> dict:
+        """
+        Fetches PR metadata from git.
+        Returns: {author, date, commits, message, branch}
+        """
+        metadata = {
+            "author": "Unknown",
+            "author_email": "",
+            "date": "",
+            "commits": 0,
+            "message": "",
+            "branch": f"pr_review_{pr_number}",
+            "files_changed": 0
+        }
+        
+        try:
+            branch = f"pr_review_{pr_number}"
+            
+            # Get author and date from last commit
+            log_result = self._run_git(
+                ["git", "log", "-1", "--format=%an|%ae|%ai|%s", branch],
+                cwd=repo_path,
+                check=False
+            )
+            if log_result.returncode == 0 and log_result.stdout.strip():
+                parts = log_result.stdout.strip().split("|")
+                if len(parts) >= 4:
+                    metadata["author"] = parts[0]
+                    metadata["author_email"] = parts[1]
+                    metadata["date"] = parts[2]
+                    metadata["message"] = parts[3]
+            
+            # Count commits in PR (compared to main/master)
+            for base in ["main", "master"]:
+                count_result = self._run_git(
+                    ["git", "rev-list", "--count", f"{base}..{branch}"],
+                    cwd=repo_path,
+                    check=False
+                )
+                if count_result.returncode == 0 and count_result.stdout.strip().isdigit():
+                    metadata["commits"] = int(count_result.stdout.strip())
+                    break
+            
+            # Count files changed
+            for base in ["main", "master"]:
+                files_result = self._run_git(
+                    ["git", "diff", "--stat", f"{base}..{branch}"],
+                    cwd=repo_path,
+                    check=False
+                )
+                if files_result.returncode == 0:
+                    # Last line has summary like "5 files changed, 100 insertions(+)"
+                    lines = files_result.stdout.strip().splitlines()
+                    if lines:
+                        metadata["files_changed"] = len(lines) - 1  # Exclude summary line
+                    break
+            
+            logger.info(f"📋 PR Metadata: {metadata['author']} | {metadata['commits']} commits | {metadata['files_changed']} files")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch PR metadata: {e}")
+        
+        return metadata
+
     def clear_cache(self):
         """Removes the temp_repos directory."""
         if self.base_dir.exists():

@@ -350,19 +350,53 @@ class BlastRadiusDetector:
         # 1. Graph Query
         partial_path = str(Path(file_path).name)
         
-        query = f"""
-        MATCH (caller)-[:CALLS]->(target:Function)
-        WHERE target.name = '{func_name}' 
-          AND (target.qualified_name CONTAINS '{partial_path}' OR target.qualified_name CONTAINS '{partial_path[:-3]}')
-        RETURN caller.qualified_name as caller_id
-        LIMIT 20
-        """
         try:
-            results = ingestor.fetch_all(query) # Using fetch_all from codebase_rag implementation
-            graph_callers = [r['caller_id'] for r in results]
+            # Strategies to find the function node
+            # Strategies to find the function node (Scoped to Project)
+            # We match the Project node first to ensure isolation.
+            # Only functions reachable from the current Project are considered valid targets.
+            project_scope = f"MATCH (p:Project {{name: '{self.project_name}'}})-[:CONTAINS_PACKAGE|CONTAINS_FOLDER|CONTAINS_FILE|CONTAINS_MODULE*]->(target:Function)"
             
-            if graph_callers:
-                return graph_callers
+            strategies = [
+                # 1. Exact Name + Path Constraint (High Precision)
+                f"""
+                {project_scope}
+                WHERE target.name = '{func_name}' 
+                  AND (target.qualified_name CONTAINS '{partial_path}' OR target.qualified_name CONTAINS '{partial_path[:-3]}')
+                MATCH (caller)-[:CALLS]->(target)
+                RETURN caller.qualified_name as caller_id
+                LIMIT 20
+                """,
+                # 2. Exact Name Only (Medium Precision)
+                f"""
+                {project_scope}
+                WHERE target.name = '{func_name}'
+                MATCH (caller)-[:CALLS]->(target)
+                RETURN caller.qualified_name as caller_id
+                LIMIT 20
+                """,
+                # 3. Fuzzy Name Match (Low Precision)
+                f"""
+                {project_scope}
+                WHERE target.name CONTAINS '{func_name}'
+                  AND (target.qualified_name CONTAINS '{partial_path[:-3]}')
+                MATCH (caller)-[:CALLS]->(target)
+                RETURN caller.qualified_name as caller_id
+                LIMIT 20
+                """
+            ]
+            
+            graph_callers = []
+            for i, query in enumerate(strategies):
+                logger.debug(f"   🔍 Graph Strategy {i+1}...")
+                results = ingestor.fetch_all(query)
+                if results:
+                    graph_callers = [r['caller_id'] for r in results]
+                    logger.success(f"   ✅ Strategy {i+1} Success: Found {len(graph_callers)} callers")
+                    return graph_callers
+            
+            logger.info(f"   📭 Graph exhausted. No callers found after {len(strategies)} strategies.")
+
         except Exception as e:
             logger.error(f"Graph query failed: {e}")
 

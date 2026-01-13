@@ -261,17 +261,30 @@ class GraphUpdater:
             or filepath.suffix.lower() == cs.CSPROJ_SUFFIX
         )
 
-    def run(self) -> None:
+    def run(self, files_to_process: list[Path] | None = None) -> None:
+        """
+        Run the graph update process.
+        
+        Args:
+            files_to_process: If provided, only process these files (incremental mode).
+                             If None, process all files in repo (full scan).
+        """
         self.ingestor.ensure_node_batch(
             cs.NODE_PROJECT, {cs.KEY_NAME: self.project_name}
         )
         logger.info(ls.ENSURING_PROJECT.format(name=self.project_name))
 
+        # For incremental updates, load existing registry from DB first
+        if files_to_process is not None:
+            logger.info("🔄 Incremental Mode: Loading existing function registry from DB...")
+            self._load_registry_from_db()
+            logger.info(f"📊 Loaded {len(self.function_registry)} existing functions from graph.")
+
         logger.info(ls.PASS_1_STRUCTURE)
         self.factory.structure_processor.identify_structure()
 
         logger.info(ls.PASS_2_FILES)
-        self._process_files()
+        self._process_files(files_to_process)
 
         logger.info(ls.FOUND_FUNCTIONS.format(count=len(self.function_registry)))
         logger.info(ls.PASS_3_CALLS)
@@ -282,7 +295,37 @@ class GraphUpdater:
         logger.info(ls.ANALYSIS_COMPLETE)
         self.ingestor.flush_all()
 
-        self._generate_semantic_embeddings()
+        self._generate_semantic_embeddings(files_to_process=files_to_process)
+
+    def _load_registry_from_db(self) -> None:
+        """Load existing function/method qualified names from Memgraph into registry."""
+        if not isinstance(self.ingestor, QueryProtocol):
+            logger.warning("Ingestor does not support querying, cannot load registry from DB.")
+            return
+            
+        query = """
+            MATCH (p:Project {name: $project_name})-[:CONTAINS_PACKAGE|CONTAINS_FOLDER|CONTAINS_FILE|CONTAINS_MODULE*]->(n)
+            WHERE n:Function OR n:Method OR n:Class
+            RETURN n.qualified_name as qn, labels(n) as labels
+        """
+        try:
+            results = self.ingestor.fetch_all(query, {"project_name": self.project_name})
+            for row in results:
+                qn = row.get("qn")
+                labels = row.get("labels", [])
+                if qn:
+                    # Determine node type from labels
+                    if "Method" in labels:
+                        node_type = cs.NodeType.METHOD
+                    elif "Function" in labels:
+                        node_type = cs.NodeType.FUNCTION
+                    elif "Class" in labels:
+                        node_type = cs.NodeType.CLASS
+                    else:
+                        node_type = cs.NodeType.FUNCTION  # default
+                    self.function_registry[qn] = node_type
+        except Exception as e:
+            logger.warning(f"Failed to load registry from DB: {e}")
 
     def remove_file_from_state(self, file_path: Path) -> None:
         logger.debug(ls.REMOVING_STATE.format(path=file_path))
@@ -316,35 +359,60 @@ class GraphUpdater:
                 self.simple_name_lookup[simple_name] = new_qn_set
                 logger.debug(ls.CLEANED_SIMPLE_NAME.format(name=simple_name))
 
-    def _process_files(self) -> None:
-        for filepath in self.repo_path.rglob("*"):
-            if filepath.is_file() and not should_skip_path(
-                filepath,
-                self.repo_path,
+    def _process_files(self, files_to_process: list[Path] | None = None) -> None:
+        """
+        Process files for definition extraction.
+        
+        Args:
+            files_to_process: If provided, only process these files.
+                             If None, scan entire repo.
+        """
+        if files_to_process is not None:
+            # Incremental mode: only process specified files
+            logger.info(f"📁 Processing {len(files_to_process)} changed files...")
+            files_iterator = files_to_process
+        else:
+            # Full scan mode
+            files_iterator = [
+                f for f in self.repo_path.rglob("*") 
+                if f.is_file() and not should_skip_path(
+                    f, self.repo_path,
+                    exclude_paths=self.exclude_paths,
+                    unignore_paths=self.unignore_paths,
+                )
+            ]
+            
+        for filepath in files_iterator:
+            if not filepath.is_file():
+                continue
+            if files_to_process is None and should_skip_path(
+                filepath, self.repo_path,
                 exclude_paths=self.exclude_paths,
                 unignore_paths=self.unignore_paths,
             ):
-                lang_config = get_language_spec(filepath.suffix)
-                if (
-                    lang_config
-                    and isinstance(lang_config.language, cs.SupportedLanguage)
-                    and lang_config.language in self.parsers
-                ):
-                    result = self.factory.definition_processor.process_file(
-                        filepath,
-                        lang_config.language,
-                        self.queries,
-                        self.factory.structure_processor.structural_elements,
-                    )
-                    if result:
-                        root_node, language = result
-                        self.ast_cache[filepath] = (root_node, language)
-                elif self._is_dependency_file(filepath.name, filepath):
-                    self.factory.definition_processor.process_dependencies(filepath)
-
-                self.factory.structure_processor.process_generic_file(
-                    filepath, filepath.name
+                continue
+                
+            lang_config = get_language_spec(filepath.suffix)
+            if (
+                lang_config
+                and isinstance(lang_config.language, cs.SupportedLanguage)
+                and lang_config.language in self.parsers
+            ):
+                result = self.factory.definition_processor.process_file(
+                    filepath,
+                    lang_config.language,
+                    self.queries,
+                    self.factory.structure_processor.structural_elements,
                 )
+                if result:
+                    root_node, language = result
+                    self.ast_cache[filepath] = (root_node, language)
+            elif self._is_dependency_file(filepath.name, filepath):
+                self.factory.definition_processor.process_dependencies(filepath)
+
+            self.factory.structure_processor.process_generic_file(
+                filepath, filepath.name
+            )
 
     def _process_function_calls(self) -> None:
         ast_cache_items = list(self.ast_cache.items())
@@ -353,7 +421,13 @@ class GraphUpdater:
                 file_path, root_node, language, self.queries
             )
 
-    def _generate_semantic_embeddings(self) -> None:
+    def _generate_semantic_embeddings(self, files_to_process: list[Path] | None = None) -> None:
+        """Generate semantic embeddings for functions.
+        
+        Args:
+            files_to_process: If provided (incremental mode), only generate embeddings
+                             for functions in these files. Otherwise, generate for all.
+        """
         if not has_semantic_dependencies():
             logger.info(ls.SEMANTIC_NOT_AVAILABLE)
             return
@@ -374,9 +448,35 @@ class GraphUpdater:
                 logger.info(ls.NO_FUNCTIONS_FOR_EMBEDDING)
                 return
 
+            # In incremental mode, filter to only functions in changed files
+            if files_to_process is not None:
+                # Normalize paths to use forward slashes and be relative
+                changed_paths = set()
+                for f in files_to_process:
+                    try:
+                        rel_path = str(f.relative_to(self.repo_path)).replace('\\', '/')
+                        changed_paths.add(rel_path)
+                    except ValueError:
+                        # Already relative or different root
+                        changed_paths.add(str(f).replace('\\', '/'))
+                
+                logger.debug(f"🔍 Changed paths for embedding filter: {changed_paths}")
+                
+                original_count = len(results)
+                filtered_results = []
+                for r in results:
+                    parsed = self._parse_embedding_result(r)
+                    if parsed:
+                        db_path = str(parsed.get(cs.KEY_PATH, '')).replace('\\', '/')
+                        if db_path in changed_paths:
+                            filtered_results.append(r)
+                results = filtered_results
+                logger.info(f"⚡ Incremental: Generating embeddings for {len(results)}/{original_count} functions in changed files")
+            
             logger.info(ls.GENERATING_EMBEDDINGS.format(count=len(results)))
 
             embedded_count = 0
+            skipped_count = 0
             for row in results:
                 parsed = self._parse_embedding_result(row)
                 if parsed is None:
@@ -390,13 +490,21 @@ class GraphUpdater:
 
                 if start_line is None or end_line is None or file_path is None:
                     logger.debug(ls.NO_SOURCE_FOR.format(name=qualified_name))
+                    continue
+                    
+                # Skip if embedding already exists (unless in incremental mode where we force update)
+                if files_to_process is None:
+                    from .vector_store import embedding_exists
+                    if embedding_exists(node_id):
+                        skipped_count += 1
+                        continue
 
-                elif source_code := self._extract_source_code(
+                if source_code := self._extract_source_code(
                     qualified_name, file_path, start_line, end_line
                 ):
                     try:
                         embedding = embed_code(source_code)
-                        store_embedding(node_id, embedding, qualified_name)
+                        store_embedding(node_id, embedding, qualified_name, project_name=self.project_name)
                         embedded_count += 1
 
                         if embedded_count % settings.EMBEDDING_PROGRESS_INTERVAL == 0:
@@ -412,6 +520,9 @@ class GraphUpdater:
                         )
                 else:
                     logger.debug(ls.NO_SOURCE_FOR.format(name=qualified_name))
+            
+            if skipped_count > 0:
+                logger.info(f"♻️ Skipped {skipped_count} existing embeddings")
             logger.info(ls.EMBEDDINGS_COMPLETE.format(count=embedded_count))
 
         except Exception as e:

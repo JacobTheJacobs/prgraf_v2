@@ -51,6 +51,23 @@ LIMIT {CYPHER_DEFAULT_LIMIT}"""
 
 CYPHER_EXAMPLE_LIMIT_ONE = """MATCH (f:File) RETURN f.path as path, f.name as name, labels(f) as type LIMIT 1"""
 
+# CALLS relationship examples
+CYPHER_EXAMPLE_FIND_CALLERS = f"""MATCH (caller:Function|Method)-[:CALLS]->(target:Function|Method)
+WHERE target.name = 'createChatModel'
+RETURN caller.name AS caller_name, caller.qualified_name AS caller_qn, target.name AS target_name
+LIMIT {CYPHER_DEFAULT_LIMIT}"""
+
+CYPHER_EXAMPLE_FIND_CALLEES = f"""MATCH (f:Function|Method)-[:CALLS]->(callee:Function|Method)
+WHERE f.name = 'createChatModel'
+RETURN f.name AS function_name, callee.name AS callee_name, callee.qualified_name AS callee_qn
+LIMIT {CYPHER_DEFAULT_LIMIT}"""
+
+CYPHER_EXAMPLE_FUNCTION_CALLS = f"""MATCH (m:Module)-[:DEFINES]->(f:Function)-[:CALLS]->(target)
+WHERE m.path CONTAINS 'helper'
+RETURN f.name AS function_name, target.name AS calls, labels(target) AS target_type
+LIMIT {CYPHER_DEFAULT_LIMIT}"""
+
+
 CYPHER_EXPORT_NODES = """
 MATCH (n)
 RETURN id(n) as node_id, labels(n) as labels, properties(n) as properties
@@ -117,3 +134,24 @@ def build_merge_relationship_query(
     )
     query += CYPHER_SET_PROPS_RETURN_COUNT if has_props else CYPHER_RETURN_COUNT
     return query
+
+
+CYPHER_EXPORT_NODES_FILTERED = """
+MATCH (p:Project {name: $project_name})
+OPTIONAL MATCH (p)-[:CONTAINS_PACKAGE|CONTAINS_FOLDER|CONTAINS_FILE|CONTAINS_MODULE*]->(container)
+OPTIONAL MATCH (container)-[:DEFINES|DEFINES_METHOD*]->(defined)
+WITH p, collect(distinct container) + collect(distinct defined) + [p] AS n_list
+UNWIND n_list AS n
+RETURN id(n) as node_id, labels(n) as labels, properties(n) as properties
+"""
+
+CYPHER_EXPORT_RELATIONSHIPS_FILTERED = """
+MATCH (p:Project {name: $project_name})
+OPTIONAL MATCH (p)-[:CONTAINS_PACKAGE|CONTAINS_FOLDER|CONTAINS_FILE|CONTAINS_MODULE*]->(container)
+OPTIONAL MATCH (container)-[:DEFINES|DEFINES_METHOD*]->(defined)
+WITH p, collect(distinct container) + collect(distinct defined) + [p] AS n_list
+UNWIND n_list AS a
+MATCH (a)-[r]->(b)
+WHERE b IN n_list
+RETURN id(a) as from_id, id(b) as to_id, type(r) as type, properties(r) as properties
+"""

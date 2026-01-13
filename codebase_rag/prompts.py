@@ -4,7 +4,9 @@ from .cypher_queries import (
     CYPHER_EXAMPLE_CONTENT_BY_PATH,
     CYPHER_EXAMPLE_DECORATED_FUNCTIONS,
     CYPHER_EXAMPLE_FILES_IN_FOLDER,
+    CYPHER_EXAMPLE_FIND_CALLERS,
     CYPHER_EXAMPLE_FIND_FILE,
+    CYPHER_EXAMPLE_FUNCTION_CALLS,
     CYPHER_EXAMPLE_KEYWORD_SEARCH,
     CYPHER_EXAMPLE_LIMIT_ONE,
     CYPHER_EXAMPLE_PYTHON_FILES,
@@ -166,7 +168,17 @@ cypher// "find things related to 'database'"
 cypher// "Find the main README.md"
 {CYPHER_EXAMPLE_FIND_FILE}
 
-**4. Output Format**
+**Pattern: Finding Function Callers (Who Calls a Function?)**
+cypher// "Find all functions that call createChatModel" or "who calls this function?"
+// Use the CALLS relationship: (caller)-[:CALLS]->(target)
+{CYPHER_EXAMPLE_FIND_CALLERS}
+
+**Pattern: Finding What a Function Calls (Callees)**
+cypher// "What does createChatModel call?" or "show me the function calls in helper.ts"
+// Module->Function->CALLS->target pattern
+{CYPHER_EXAMPLE_FUNCTION_CALLS}
+
+**5. Output Format**
 Provide only the Cypher query.
 """
 

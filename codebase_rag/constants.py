@@ -828,6 +828,7 @@ IGNORE_SUFFIXES = frozenset(
 
 PAYLOAD_NODE_ID = "node_id"
 PAYLOAD_QUALIFIED_NAME = "qualified_name"
+PAYLOAD_PROJECT_NAME = "project_name"
 
 
 class EventType(StrEnum):

@@ -26,7 +26,9 @@ from ..cypher_queries import (
     CYPHER_DELETE_ALL,
     CYPHER_DELETE_PROJECT,
     CYPHER_EXPORT_NODES,
+    CYPHER_EXPORT_NODES_FILTERED,
     CYPHER_EXPORT_RELATIONSHIPS,
+    CYPHER_EXPORT_RELATIONSHIPS_FILTERED,
     CYPHER_LIST_PROJECTS,
     build_constraint_query,
     build_merge_node_query,
@@ -348,8 +350,15 @@ class MemgraphIngestor:
     def export_graph_to_dict(self) -> GraphData:
         logger.info(ls.MG_EXPORTING)
 
-        nodes_data = self.fetch_all(CYPHER_EXPORT_NODES)
-        relationships_data = self.fetch_all(CYPHER_EXPORT_RELATIONSHIPS)
+    def export_graph_to_dict(self, project_name: str | None = None) -> GraphData:
+        if project_name:
+            # Filtered Export
+            nodes_data = self.fetch_all(CYPHER_EXPORT_NODES_FILTERED, {"project_name": project_name})
+            relationships_data = self.fetch_all(CYPHER_EXPORT_RELATIONSHIPS_FILTERED, {"project_name": project_name})
+        else:
+            # Full Export
+            nodes_data = self.fetch_all(CYPHER_EXPORT_NODES)
+            relationships_data = self.fetch_all(CYPHER_EXPORT_RELATIONSHIPS)
 
         metadata = GraphMetadata(
             total_nodes=len(nodes_data),
@@ -365,6 +374,11 @@ class MemgraphIngestor:
             relationships=relationships_data,
             metadata=metadata,
         )
+
+    def delete_project(self, project_name: str) -> None:
+        """Deletes all nodes and relationships belonging to a project."""
+        logger.info(f"🗑️ Deleting project '{project_name}' from Graph (Fresh Start)...")
+        self.fetch_all(CYPHER_DELETE_PROJECT, {"project_name": project_name})
 
     def _get_current_timestamp(self) -> str:
         return datetime.now(UTC).isoformat()

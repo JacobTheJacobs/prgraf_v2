@@ -56,6 +56,10 @@ class AppConfig(BaseSettings):
     MEMGRAPH_BATCH_SIZE: int = 1000
     AGENT_RETRIES: int = 3
     ORCHESTRATOR_OUTPUT_RETRIES: int = 100
+    
+    # Gemini API for Tier 2 Summaries
+    GEMINI_API_KEY: str = ""
+    ENABLE_SUMMARIES: bool = True
 
     ORCHESTRATOR_PROVIDER: str = ""
     ORCHESTRATOR_MODEL: str = ""

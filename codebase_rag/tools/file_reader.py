@@ -25,10 +25,22 @@ class FileReader:
     @validate_project_path(FileReadResult, path_arg_name="file_path")
     async def _read_validated(self, file_path: Path) -> FileReadResult:
         try:
+            # If exact path doesn't exist, try to find by filename
             if not file_path.is_file():
-                return FileReadResult(
-                    file_path=str(file_path), error_message=te.FILE_NOT_FOUND
-                )
+                filename = file_path.name
+                # Search for file in project
+                matches = list(self.project_root.rglob(f"*/{filename}"))
+                if not matches:
+                    matches = list(self.project_root.rglob(filename))
+                    
+                if matches:
+                    # Use first match
+                    file_path = matches[0]
+                    logger.info(f"[FileReader] Found file via search: {file_path}")
+                else:
+                    return FileReadResult(
+                        file_path=str(file_path), error_message=te.FILE_NOT_FOUND
+                    )
 
             if file_path.suffix.lower() in cs.BINARY_EXTENSIONS:
                 error_msg = te.BINARY_FILE.format(path=file_path)

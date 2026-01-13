@@ -15,7 +15,7 @@ from ..utils.dependencies import has_semantic_dependencies
 from . import tool_descriptions as td
 
 
-def semantic_code_search(query: str, top_k: int = 5) -> list[SemanticSearchResult]:
+def semantic_code_search(query: str, top_k: int = 5, project_name: str | None = None) -> list[SemanticSearchResult]:
     if not has_semantic_dependencies():
         logger.warning(ex.SEMANTIC_EXTRA)
         return []
@@ -28,7 +28,7 @@ def semantic_code_search(query: str, top_k: int = 5) -> list[SemanticSearchResul
 
         query_embedding = embed_code(query)
 
-        search_results = search_embeddings(query_embedding, top_k=top_k)
+        search_results = search_embeddings(query_embedding, top_k=top_k, project_name=project_name)
 
         if not search_results:
             logger.info(ls.SEMANTIC_NO_MATCH.format(query=query))
@@ -118,11 +118,11 @@ def get_function_source_code(node_id: int) -> str | None:
         return None
 
 
-def create_semantic_search_tool() -> Tool:
+def create_semantic_search_tool(project_name: str | None = None) -> Tool:
     async def semantic_search_functions(query: str, top_k: int = 5) -> str:
         logger.info(ls.SEMANTIC_TOOL_SEARCH.format(query=query))
 
-        results = semantic_code_search(query, top_k)
+        results = semantic_code_search(query, top_k, project_name=project_name)
 
         if not results:
             return cs.MSG_SEMANTIC_NO_RESULTS.format(query=query)
