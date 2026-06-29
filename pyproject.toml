@@ -1,126 +1,22 @@
 [project]
-name = "graph-code"
-version = "0.0.29"
-description = "The ultimate RAG for your monorepo. Query, understand, and edit multi-language codebases with the power of AI and knowledge graphs"
+name = "prgraf"
+version = "0.1.0"
+description = "Low-noise blast-radius PR reviewer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "loguru>=0.7.3",
-    "mcp>=1.21.1",
-    "pydantic-ai>=1.27.0",
-    "pydantic-settings>=2.0.0",
-    "pymgclient>=1.4.0",
-    "python-dotenv>=1.1.0",
-    "toml>=0.10.2",
-    "tree-sitter-python>=0.23.6",
-    "tree-sitter==0.25.0",
-    "watchdog>=6.0.0",
-    "typer>=0.12.5",
-    "rich>=13.7.1",
-    "prompt-toolkit>=3.0.0",
-    "diff-match-patch>=20241021",
-    "click>=8.0.0",
-    "protobuf>=5.27.0",
-    "defusedxml>=0.7.1",
     "fastapi>=0.110.0",
+    "loguru>=0.7.3",
     "uvicorn>=0.29.0",
-    "requests>=2.31.0",
-    "qdrant-client>=1.9.0",
-    "torch>=2.6.0",
-    "transformers>=4.0.0",
-    "tree-sitter-javascript>=0.23.1",
-    "tree-sitter-typescript>=0.23.2",
-    "tree-sitter-rust>=0.24.0",
-    "tree-sitter-go>=0.23.4",
-    "tree-sitter-scala>=0.24.0",
-    "tree-sitter-java>=0.23.5",
-    "tree-sitter-cpp>=0.23.0",
-    "tree-sitter-lua>=0.0.19",
-    "google-generativeai>=0.8.6",
 ]
 
 [project.scripts]
-graph-code = "codebase_rag.cli:app"
-cgr = "codebase_rag.cli:app"
+prgraf = "codebase_rag.api:main"
 
-[tool.uv]
-package = true
-
-[tool.setuptools]
-packages = ["codebase_rag", "codec"]
-
-[project.optional-dependencies]
-test = [
-    "pytest>=8.4.1",
-    "pytest-asyncio>=1.0.0",
-    "pytest-xdist>=3.8.0",
-    "testcontainers>=4.9.0",
-]
-
-treesitter-full = []
-
-semantic = []
-
-[tool.ruff]
-line-length = 88
-target-version = "py312"
-exclude = ["codec/"]
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "PL", "T201"]
-ignore = [
-    "E501",     # line too long
-    "PLR2004",  # magic value comparison (too noisy)
-    "PLC0415",  # import not at top-level (intentional lazy imports)
-    "PLR0913",  # too many arguments (often unavoidable)
-    "PLR0911",  # too many return statements
-    "PLR0912",  # too many branches
-    "PLR0915",  # too many statements
-    "PLW2901",  # loop variable overwritten (intentional for .strip())
-    "PLW0603",  # global statement (singleton pattern)
-]
-
-[tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["T201"]
-
-[tool.ruff.format]
-quote-style = "double"
-
-[tool.ty.environment]
-python-version = "3.12"
-
-[tool.ty.src]
-exclude = ["codebase_rag/tests/test_cypher_queries.py", "codebase_rag/tests/test_code_retrieval.py", "codebase_rag/tests/test_call_resolver.py"]
+[tool.setuptools.packages.find]
+include = ["codebase_rag*"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["codebase_rag/tests"]
-norecursedirs = ["grammars", ".git", "__pycache__", "*.egg-info", ".venv", "venv"]
-python_files = ["test_*.py", "*_test.py"]
+python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-markers = [
-    "slow: marks tests as slow (may download models or require external services)",
-    "integration: marks tests as integration tests requiring Docker",
-    "e2e: marks tests as end-to-end tests",
-]
-
-[dependency-groups]
-dev = [
-    "bandit>=1.9.2",
-    "coverage>=7.13.0",
-    "pre-commit>=4.2.0",
-    "pyinstaller>=6.14.1",
-    "pylint>=4.0.4",
-    "radon>=6.0.1",
-    "ruff>=0.5.5",
-    "semgrep>=1.79.0",
-    "ty>=0.0.7",
-    "types-protobuf>=5.0.0",
-    "types-toml>=0.10.8.20240310",
-    "vulture>=2.14",
-]
-
-[tool.bandit]
-exclude_dirs = ["codebase_rag/tests", "scripts"]
-skips = ["B101"]

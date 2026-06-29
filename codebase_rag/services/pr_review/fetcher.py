@@ -1,208 +1,66 @@
 import subprocess
-import os
 from pathlib import Path
-import shutil
+
 from loguru import logger
 
-# Force UTF-8 encoding on Windows
-if os.name == 'nt':
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 class RepoFetcher:
-    """Handles cloning and updating of git repositories."""
-
     def __init__(self, base_dir: str = "temp_repos"):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_git(self, cmd, cwd=None, check=True):
-        """Run git command with proper encoding handling."""
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',  # Replace bad chars instead of crashing
-                check=check
-            )
-            return result
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Git command failed: {' '.join(cmd)}: {e}")
-            raise
-
-    def _get_file_content(self, cmd, cwd):
-        """Get file content with encoding fallback."""
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                encoding='utf-8',
-                errors='replace'
-            )
-            return result.stdout if result.returncode == 0 else ""
-        except Exception:
-            return ""
-
     def fetch_repo(self, repo_url: str) -> Path:
-        """Clones a repo and returns its local path."""
         repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
-        target_path = self.base_dir / repo_name
+        repo_path = self.base_dir / repo_name
 
-        if target_path.exists():
-            logger.info(f"🔄 Repo {repo_name} already exists. Pulling latest...")
-            try:
-                self._run_git(["git", "pull"], cwd=target_path, check=False)
-            except Exception as e:
-                 logger.warning(f"⚠️ Failed to pull {repo_name}: {e}. Continuing with existing version.")
+        if repo_path.exists():
+            logger.info(f"Updating {repo_name}")
+            self._git(["git", "pull"], cwd=repo_path, check=False)
         else:
-            logger.info(f"⬇️ Cloning {repo_name}...")
-            subprocess.run(["git", "clone", repo_url, str(target_path)], check=True)
-        
-        return target_path
+            logger.info(f"Cloning {repo_name}")
+            self._git(["git", "clone", repo_url, str(repo_path)])
+
+        return repo_path
 
     def fetch_pr_diff(self, repo_path: Path, pr_number: int) -> list[dict]:
-        """
-        Fetches a PR to a temporary branch and calculates the diff.
-        Returns a list of changes: [{'file': str, 'old_content': str, 'new_content': str}]
-        """
-        try:
-            # Delete old branch if it exists (to force fresh fetch)
-            self._run_git(["git", "branch", "-D", f"pr_review_{pr_number}"], cwd=repo_path, check=False)
-            
-            # Fetch PR ref (force)
-            logger.info(f"⬇️ Fetching PR #{pr_number} (fresh)...")
-            self._run_git(["git", "fetch", "origin", f"pull/{pr_number}/head:pr_review_{pr_number}"], cwd=repo_path)
-            
-            # Get changed files - try master first, then main
-            result = self._run_git(
-                ["git", "diff", "--name-only", f"master...pr_review_{pr_number}"], 
-                cwd=repo_path, 
-                check=False
+        branch = f"pr_review_{pr_number}"
+        self._git(["git", "branch", "-D", branch], cwd=repo_path, check=False)
+        self._git(["git", "fetch", "origin", f"pull/{pr_number}/head:{branch}"], cwd=repo_path)
+
+        base = self._detect_base(repo_path, branch)
+        files = self._git(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=repo_path).stdout.splitlines()
+
+        changes = []
+        for file_path in [file.strip() for file in files if file.strip()]:
+            merge_base = self._git(["git", "merge-base", base, branch], cwd=repo_path).stdout.strip()
+            changes.append(
+                {
+                    "file": file_path,
+                    "old_content": self._show(repo_path, merge_base, file_path),
+                    "new_content": self._show(repo_path, branch, file_path),
+                }
             )
-            
-            if result.returncode != 0 or not result.stdout.strip():
-                result = self._run_git(
-                    ["git", "diff", "--name-only", f"main...pr_review_{pr_number}"],
-                    cwd=repo_path,
-                    check=False
-                )
 
-            files = [f for f in result.stdout.splitlines() if f.strip()]
-            
-            if not files:
-                logger.warning("⚠️ No files detected in PR diff.")
-                return []
-            
-            changes = []
-            
-            for file in files:
-                # Get merge base
-                try:
-                    merge_base_result = self._run_git(
-                        ["git", "merge-base", "HEAD", f"pr_review_{pr_number}"],
-                        cwd=repo_path,
-                        check=False
-                    )
-                    merge_base = merge_base_result.stdout.strip() if merge_base_result.returncode == 0 else "HEAD"
-                except Exception:
-                    merge_base = "HEAD"
-                
-                # Read old content
-                old_content = self._get_file_content(
-                    ["git", "show", f"{merge_base}:{file}"],
-                    cwd=repo_path
-                )
-                
-                # Read new content
-                new_content = self._get_file_content(
-                    ["git", "show", f"pr_review_{pr_number}:{file}"],
-                    cwd=repo_path
-                )
+        logger.info(f"Detected {len(changes)} changed file(s)")
+        return changes
 
-                changes.append({
-                    "file": file,
-                    "old_content": old_content,
-                    "new_content": new_content
-                })
-                logger.info(f"  📄 Detected change: {file} (old: {len(old_content)} chars, new: {len(new_content)} chars)")
-            
-            logger.info(f"📊 Total files changed in PR: {len(changes)}")
-            return changes
+    def _detect_base(self, repo_path: Path, branch: str) -> str:
+        for base in ("main", "master"):
+            result = self._git(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=repo_path, check=False)
+            if result.returncode == 0:
+                return base
+        return "HEAD"
 
-        except Exception as e:
-            logger.error(f"⚠️ Failed to fetch PR changes: {e}")
-            return []
+    def _show(self, repo_path: Path, ref: str, file_path: str) -> str:
+        return self._git(["git", "show", f"{ref}:{file_path}"], cwd=repo_path, check=False).stdout
 
-    def fetch_pr_metadata(self, repo_path: Path, pr_number: int) -> dict:
-        """
-        Fetches PR metadata from git.
-        Returns: {author, date, commits, message, branch}
-        """
-        metadata = {
-            "author": "Unknown",
-            "author_email": "",
-            "date": "",
-            "commits": 0,
-            "message": "",
-            "branch": f"pr_review_{pr_number}",
-            "files_changed": 0
-        }
-        
-        try:
-            branch = f"pr_review_{pr_number}"
-            
-            # Get author and date from last commit
-            log_result = self._run_git(
-                ["git", "log", "-1", "--format=%an|%ae|%ai|%s", branch],
-                cwd=repo_path,
-                check=False
-            )
-            if log_result.returncode == 0 and log_result.stdout.strip():
-                parts = log_result.stdout.strip().split("|")
-                if len(parts) >= 4:
-                    metadata["author"] = parts[0]
-                    metadata["author_email"] = parts[1]
-                    metadata["date"] = parts[2]
-                    metadata["message"] = parts[3]
-            
-            # Count commits in PR (compared to main/master)
-            for base in ["main", "master"]:
-                count_result = self._run_git(
-                    ["git", "rev-list", "--count", f"{base}..{branch}"],
-                    cwd=repo_path,
-                    check=False
-                )
-                if count_result.returncode == 0 and count_result.stdout.strip().isdigit():
-                    metadata["commits"] = int(count_result.stdout.strip())
-                    break
-            
-            # Count files changed
-            for base in ["main", "master"]:
-                files_result = self._run_git(
-                    ["git", "diff", "--stat", f"{base}..{branch}"],
-                    cwd=repo_path,
-                    check=False
-                )
-                if files_result.returncode == 0:
-                    # Last line has summary like "5 files changed, 100 insertions(+)"
-                    lines = files_result.stdout.strip().splitlines()
-                    if lines:
-                        metadata["files_changed"] = len(lines) - 1  # Exclude summary line
-                    break
-            
-            logger.info(f"📋 PR Metadata: {metadata['author']} | {metadata['commits']} commits | {metadata['files_changed']} files")
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch PR metadata: {e}")
-        
-        return metadata
-
-    def clear_cache(self):
-        """Removes the temp_repos directory."""
-        if self.base_dir.exists():
-            import shutil
-            shutil.rmtree(self.base_dir)
-
+    def _git(self, cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=check,
+        )

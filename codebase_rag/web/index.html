@@ -4,77 +4,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Code-Graph RAG | PR Reviewer</title>
+    <title>Blast-Radius PR Reviewer</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap"
-        rel="stylesheet">
 </head>
 
 <body>
-    <div class="background-mesh"></div>
-
     <main>
-        <!-- LOGIN VIEW -->
-        <section id="login-view" class="view active">
-            <div class="glass-card login-card">
-                <div class="brand-header">
-                    <div class="logo-icon">🔮</div>
-                    <h1>Code-Graph RAG</h1>
-                    <p>Intelligent PR Review Agent</p>
-                </div>
+        <header>
+            <p class="eyebrow">Pre-Landing Review</p>
+            <h1>Blast-Radius PR Reviewer</h1>
+            <p class="lede">Low-noise guesses about what might break when this PR lands.</p>
+        </header>
 
-                <form id="login-form">
-                    <div class="input-group">
-                        <label for="github-token">GitHub Personal Access Token</label>
-                        <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" required>
-                        <span class="hint">Tokens are stored locally in your browser session.</span>
-                    </div>
-
-                    <button type="submit" class="btn-primary">
-                        <span class="btn-text">Connect to Agent</span>
-                        <div class="btn-glow"></div>
-                    </button>
-
-                    <div class="status-message" id="login-status"></div>
-                </form>
+        <section class="card">
+            <div class="form-row">
+                <input id="pr-url" type="text" placeholder="https://github.com/owner/repo/pull/123">
+                <button id="analyze-btn">Run Review</button>
             </div>
+            <pre id="review-output">Enter a PR URL to get the top blast-radius findings.</pre>
         </section>
 
-        <!-- DASHBOARD VIEW (Hidden Initially) -->
-        <section id="dashboard-view" class="view hidden">
-            <nav class="top-nav">
-                <div class="nav-brand">🔮 Code-Graph Agent</div>
-                <div class="nav-actions">
-                    <button id="logout-btn" class="btn-ghost">Disconnect</button>
-                </div>
-            </nav>
-
-            <div class="container">
-                <header class="dashboard-header">
-                    <h2>Review Dashboard</h2>
-                    <div class="pr-input-container">
-                        <input type="text" id="pr-url" placeholder="https://github.com/owner/repo/pull/123"
-                            value="https://github.com/The-Pocket/PocketFlow-Tutorial-Codebase-Knowledge/pull/126">
-                        <button id="analyze-btn" class="btn-action">Analyze PR</button>
-                    </div>
-                </header>
-
-                <div class="tabs">
-                    <button class="tab-btn active" data-tab="triage">Triage</button>
-                    <button class="tab-btn" data-tab="blast">Blast Radius</button>
-                    <button class="tab-btn" data-tab="review">Architect Review</button>
-                    <button class="tab-btn" data-tab="logs">Logs 📜</button>
-                </div>
-
-                <div class="tab-content" id="content-area">
-                    <div class="placeholder-state">
-                        <p>Enter a PR URL and click Analyze to start the pipeline.</p>
-                    </div>
-                </div>
+        <section class="logs">
+            <div class="logs-header">
+                <span>Logs</span>
+                <button id="refresh-logs-btn">Refresh</button>
             </div>
+            <pre id="log-area"></pre>
         </section>
     </main>
 
