@@ -13,8 +13,9 @@ Surfaces:
   self-contained HTML snapshot.
 - **MCP** — `prgraf-mcp`, graph tools with `detail_level` tiering.
 
-No LLM calls in-product, no vector search, no external graph database. A regex
-heuristic engine remains as `--engine heuristic` fallback.
+No LLM calls in-product, no vector search, no external graph database. Narration
+is optional and additive — an MCP host agent, or one small editor-model call
+that sees only computed graph facts, never your diff.
 
 ## Use as a PR template (recommended)
 
@@ -85,18 +86,20 @@ Pre-Landing Review: 2 blast-radius finding(s)
 
 | Path | Role |
 |------|------|
+| `codebase_rag/graph/` | **The engine** — extract, link, impact, risk, review |
 | `codebase_rag/cli.py` | **CLI** — what CI runs |
 | `template/.github/workflows/` | **PR template** workflow |
-| `codebase_rag/services/pocket_router.py` | Blast-radius rules |
-| `codebase_rag/services/pr_review/` | Triage + git fetch/diff |
-| `codebase_rag/api.py` | Optional FastAPI + static UI |
-| `codebase_rag/web/` | Optional UI |
+| `codebase_rag/api.py` | FastAPI server for the web app |
+| `codebase_rag/web/` | The UI — one renderer, shared by every surface |
+| `codebase_rag/graph/mcp_server.py` | MCP server (7 tools) |
+| `vscode-extension/` | VS Code webview over the same `web/app.js` |
+| `tests/test_graph_engine.py` | Engine tests |
 
 ## Verify
 
 ```bash
-python -m py_compile codebase_rag/cli.py codebase_rag/api.py codebase_rag/services/pr_service.py codebase_rag/services/pocket_router.py codebase_rag/services/pr_review/analyzer.py codebase_rag/services/pr_review/fetcher.py
-python test_pr_review.py
-python test_real_repo_pr.py
-prgraf --base HEAD --head HEAD --quiet   # empty range smoke
+python -m py_compile codebase_rag/cli.py codebase_rag/api.py codebase_rag/graph/*.py
+python tests/test_graph_engine.py               # 11 engine tests
+prgraf --repo . --base HEAD~1 --quiet           # real review
+prgraf-web                                      # UI on http://localhost:8000
 ```

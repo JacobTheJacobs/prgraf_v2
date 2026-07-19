@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 from loguru import logger
 
-from codebase_rag.services.pocket_router import PocketStrategyRouter
-from codebase_rag.services.pr_review.fetcher import RepoFetcher
+from codebase_rag.graph.build import build_graph
+from codebase_rag.graph.review import format_report, review_range
+from codebase_rag.graph.store import default_db_path
 
 
 def _env(*names: str, default: str | None = None) -> str | None:
@@ -43,13 +45,23 @@ def _resolve_base(repo: Path, base: str | None) -> str:
     return "HEAD~1"
 
 
-def _ref_exists(repo: Path, ref: str) -> bool:
-    result = RepoFetcher()._git(
-        ["git", "rev-parse", "--verify", ref],
+def _git(args: list[str], repo: Path) -> subprocess.CompletedProcess:
+    """Run git with list args (no shell) and never raise on a bad exit."""
+    return subprocess.run(  # noqa: S603 - list args, no shell
+        ["git", *args],
         cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=30,
         check=False,
     )
-    return result.returncode == 0
+
+
+def _ref_exists(repo: Path, ref: str) -> bool:
+    return _git(["rev-parse", "--verify", ref], repo).returncode == 0
 
 
 def _severity_rank(severity: str) -> int:
@@ -78,40 +90,20 @@ def _should_fail(report: str, fail_on: str) -> bool:
     return False
 
 
-def build_report(
-    repo: Path,
-    base: str | None = None,
-    head: str = "HEAD",
-    engine: str = "graph",
-) -> str:
+def build_report(repo: Path, base: str | None = None, head: str = "HEAD") -> str:
+    """Graph-backed review: the same findings the UI and MCP tools produce.
+
+    Errors propagate on purpose. An earlier version fell back to a regex
+    reviewer on any exception, which silently swallowed real failures — a
+    too-broad scope produced noisy findings instead of the error saying so.
+    """
     repo = repo.resolve()
-    resolved_base = _resolve_base(repo, base)
-
-    if engine == "graph":
-        try:
-            return _graph_report(repo, resolved_base, head)
-        except Exception as exc:  # noqa: BLE001 - CI must still get a report
-            logger.warning(f"graph engine failed ({exc}); falling back to heuristic")
-
-    fetcher = RepoFetcher()
-    changes = fetcher.fetch_range_diff(repo, base=resolved_base, head=head)
-    router = PocketStrategyRouter()
-    return router.route_and_review(
-        {"changes": changes, "base": resolved_base, "head": head},
-        repo_root=repo,
-    )
-
-
-def _graph_report(repo: Path, base: str, head: str) -> str:
-    """Graph-backed review: same findings the web UI and MCP tools produce."""
-    from codebase_rag.graph.build import build_graph
-    from codebase_rag.graph.review import format_report, review_range
-    from codebase_rag.graph.store import default_db_path
-
     db = default_db_path(repo)
     # Incremental: only re-parses changed files after the first build.
     build_graph(repo, db_path=db)
-    return format_report(review_range(repo, base=base, head=head, db_path=db))
+    return format_report(
+        review_range(repo, base=_resolve_base(repo, base), head=head, db_path=db)
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,12 +139,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero when findings meet this threshold",
     )
     parser.add_argument(
-        "--engine",
-        choices=("graph", "heuristic"),
-        default=_env("PRGRAF_ENGINE", default="graph"),
-        help="Review engine: graph (tree-sitter blast radius) or heuristic (regex)",
-    )
-    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Only print the report (less log noise)",
@@ -165,13 +151,12 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo)
     if not (repo / ".git").exists() and not (repo / ".git").is_file():
         # Allow worktrees / nested checkouts where .git may be a file
-        result = RepoFetcher()._git(["git", "rev-parse", "--git-dir"], cwd=repo, check=False)
-        if result.returncode != 0:
+        if _git(["rev-parse", "--git-dir"], repo).returncode != 0:
             print(f"error: not a git repository: {repo}", file=sys.stderr)
             return 2
 
     try:
-        report = build_report(repo=repo, base=args.base, head=args.head, engine=args.engine)
+        report = build_report(repo=repo, base=args.base, head=args.head)
     except Exception as exc:
         logger.error(f"Review failed: {exc}")
         print(f"error: {exc}", file=sys.stderr)
