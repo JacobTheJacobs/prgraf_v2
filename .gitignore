@@ -29,3 +29,6 @@ PROJECT.md
 .prgraf/
 prgraf-report.md
 temp_repos/
+vscode-extension/node_modules/
+vscode-extension/*.vsix
+webview-test.html

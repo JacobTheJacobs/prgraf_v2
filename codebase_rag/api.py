@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from codebase_rag.graph.build import build_graph
-from codebase_rag.graph.review import format_report, review_range
+from codebase_rag.graph.review import review_range, web_payload
 from codebase_rag.graph.store import GraphStore, default_db_path
 
 
@@ -47,40 +47,6 @@ app.add_middleware(
 
 log_store = LogStore()
 logger.add(log_store.sink, format="{message}", level="INFO")
-
-
-def _render_graph(result, cap: int) -> dict:
-    """Trim the subgraph to what reads well: all seeds + top-N by impact.
-
-    The full radius can be many hundreds of nodes; showing every one turns
-    the picture into a hairball and makes the layout O(n^2) expensive. Seeds
-    are always kept (they are the change itself); the rest are the highest-
-    impact nodes, which is exactly what a reviewer should look at first.
-    """
-    sub = result.subgraph
-    seeds = set(sub.get("seeds", []))
-    scores = sub.get("impact_scores", {})
-    nodes = sub.get("nodes", [])
-
-    ranked = sorted(
-        (n for n in nodes if n["qualified_name"] not in seeds),
-        key=lambda n: -scores.get(n["qualified_name"], 0.0),
-    )
-    keep = seeds | {n["qualified_name"] for n in ranked[: max(0, cap)]}
-
-    kept_nodes = [n for n in nodes if n["qualified_name"] in keep]
-    kept_edges = [
-        e for e in sub.get("edges", [])
-        if e["source"] in keep and e["target"] in keep
-    ]
-    return {
-        "seeds": sorted(seeds),
-        "nodes": kept_nodes,
-        "edges": kept_edges,
-        "impact_scores": {qn: s for qn, s in scores.items() if qn in keep},
-        "shown": len(kept_nodes),
-        "total": len(nodes),
-    }
 
 
 def _resolve_repo(raw: str | None) -> Path:
@@ -118,33 +84,7 @@ async def review(request: Request):
         head = data.get("head") or "HEAD"
         render_cap = int(data.get("render_cap") or 160)
         result = review_range(repo, base=base, head=head, db_path=db)
-
-        return {
-            "status": "ok",
-            "report": format_report(result),
-            "overall_risk": result.overall,
-            "findings": [
-                {
-                    "symbol": f.node.qualified_name,
-                    "name": f.node.name,
-                    "kind": f.node.kind,
-                    "severity": f.severity,
-                    "level": f.level,
-                    "risk": f.score,
-                    "location": f"{f.node.file_path}:{f.node.line_start}",
-                    "reasons": f.factors.reasons(),
-                    "impacted": f.impacted_count,
-                    "impacted_files": f.impacted_files,
-                    "tests": f.test_count,
-                    "callers": f.caller_count,
-                    "top_impacted": f.top_impacted,
-                }
-                for f in result.findings
-            ],
-            "changed_files": result.changed_files,
-            "graph": _render_graph(result, render_cap),
-            "truncated": result.truncated,
-        }
+        return web_payload(result, cap=render_cap)
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Review failed: {exc}")
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)

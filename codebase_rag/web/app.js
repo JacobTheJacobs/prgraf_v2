@@ -440,6 +440,8 @@ class RadialGraph {
     for (const m of this.nodes) m.g.classList.toggle("active", m.id === n.id);
     this.showDetail(n);
     this.hover(n);
+    // In the VSCode webview this opens the symbol's file; no-op in the browser.
+    if (window.__prgrafOpen && n.file) window.__prgrafOpen(n.file, n.line);
   }
 
   focusSymbol(qn) {

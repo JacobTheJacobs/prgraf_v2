@@ -185,6 +185,68 @@ def review_range(
         store.close()
 
 
+def render_graph(result: ReviewResult, cap: int = 160) -> dict:
+    """Trim the subgraph to what reads well: all seeds + top-N by impact.
+
+    The full radius can be hundreds of nodes; showing every one is a hairball
+    and makes the O(n^2) layout expensive. Seeds are always kept (they are the
+    change); the rest are the highest-impact nodes — what to look at first.
+    """
+    sub = result.subgraph
+    seeds = set(sub.get("seeds", []))
+    scores = sub.get("impact_scores", {})
+    nodes = sub.get("nodes", [])
+
+    ranked = sorted(
+        (n for n in nodes if n["qualified_name"] not in seeds),
+        key=lambda n: -scores.get(n["qualified_name"], 0.0),
+    )
+    keep = seeds | {n["qualified_name"] for n in ranked[: max(0, cap)]}
+    kept_nodes = [n for n in nodes if n["qualified_name"] in keep]
+    kept_edges = [
+        e for e in sub.get("edges", [])
+        if e["source"] in keep and e["target"] in keep
+    ]
+    return {
+        "seeds": sorted(seeds),
+        "nodes": kept_nodes,
+        "edges": kept_edges,
+        "impact_scores": {qn: s for qn, s in scores.items() if qn in keep},
+        "shown": len(kept_nodes),
+        "total": len(nodes),
+    }
+
+
+def web_payload(result: ReviewResult, cap: int = 160) -> dict:
+    """The render contract shared by the web app and the VSCode extension."""
+    return {
+        "status": "ok",
+        "report": format_report(result),
+        "overall_risk": result.overall,
+        "findings": [
+            {
+                "symbol": f.node.qualified_name,
+                "name": f.node.name,
+                "kind": f.node.kind,
+                "severity": f.severity,
+                "level": f.level,
+                "risk": f.score,
+                "location": f"{f.node.file_path}:{f.node.line_start}",
+                "reasons": f.factors.reasons(),
+                "impacted": f.impacted_count,
+                "impacted_files": f.impacted_files,
+                "tests": f.test_count,
+                "callers": f.caller_count,
+                "top_impacted": f.top_impacted,
+            }
+            for f in result.findings
+        ],
+        "changed_files": result.changed_files,
+        "graph": render_graph(result, cap),
+        "truncated": result.truncated,
+    }
+
+
 def format_report(result: ReviewResult) -> str:
     """Terse text report — the PR-comment surface."""
     if not result.all_risks:

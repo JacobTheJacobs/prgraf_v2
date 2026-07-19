@@ -1,0 +1,52 @@
+{
+  "name": "prgraf",
+  "displayName": "prgraf — blast-radius review",
+  "description": "See what a change might break: an Obsidian-style blast-radius graph of your working diff, inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "jacobthejacobs",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["SCM Providers", "Visualization"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "prgraf.review",
+        "title": "prgraf: Review blast radius",
+        "icon": "$(graph)"
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "prgraf.review",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "prgraf",
+      "properties": {
+        "prgraf.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter that has the prgraf package installed (pip install -e .)."
+        },
+        "prgraf.base": {
+          "type": "string",
+          "default": "HEAD~1",
+          "description": "Default base ref to diff the working tree against."
+        },
+        "prgraf.head": {
+          "type": "string",
+          "default": "HEAD",
+          "description": "Head ref to review."
+        }
+      }
+    }
+  }
+}
