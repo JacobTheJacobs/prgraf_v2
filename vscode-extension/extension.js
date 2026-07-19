@@ -65,7 +65,21 @@ function runReview(context) {
     () =>
       new Promise((resolve) => {
         const args = ["-m", "codebase_rag.graph.export_cli", "--repo", root, "--base", base, "--head", head];
-        cp.execFile(python, args, { cwd: root, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const opts = {
+          cwd: root,
+          maxBuffer: 64 * 1024 * 1024,
+          // Never hang forever: a runaway index should surface, not spin.
+          timeout: 5 * 60 * 1000,
+        };
+        const child = cp.execFile(python, args, opts, (err, stdout, stderr) => {
+          if (err && err.killed) {
+            panel.webview.html = errorHtml(
+              "Timed out after 5 minutes.\n\nThe folder you opened may contain many " +
+              "projects rather than one repository. Open the specific project instead."
+            );
+            resolve();
+            return;
+          }
           if (err && !stdout) {
             panel.webview.html = errorHtml(`Engine failed.\n\n${stderr || err.message}`);
             resolve();
@@ -93,6 +107,15 @@ function runReview(context) {
             : errorHtml("prgraf package not found for the configured interpreter.\nRun: pip install -e . (see prgraf.pythonPath).");
           resolve();
         });
+
+        // The engine logs progress to stderr; echo the latest line into the
+        // loading screen so a long build reads as working, not frozen.
+        if (child.stderr) {
+          child.stderr.on("data", (chunk) => {
+            const line = String(chunk).trim().split("\n").pop();
+            if (line) panel.webview.html = loadingHtml(line.slice(0, 160));
+          });
+        }
       })
   );
 

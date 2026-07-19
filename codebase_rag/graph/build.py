@@ -7,28 +7,39 @@ which files get re-parsed. Content hashes decide, not mtimes.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from pathlib import Path
 
 from loguru import logger
 
-from .constants import MAX_FILE_BYTES, SKIP_DIRS
+from .constants import MAX_FILE_BYTES, MAX_INDEX_FILES, SKIP_DIRS
 from .extract import extract_file, language_for
 from .link import link_graph
 from .store import GraphStore, default_db_path
 
 
+class ScopeTooLargeError(RuntimeError):
+    """The target looks like a folder of many projects, not one repo."""
+
+
 def iter_source_files(repo_root: Path) -> list[Path]:
-    """Every parseable file under repo_root, skipping vendored/build dirs."""
+    """Every parseable file under repo_root, skipping vendored/build dirs.
+
+    Prunes directories during the walk rather than filtering after the fact:
+    rglob("*") descends into node_modules/.git/.venv and only then discards
+    them, which on a big tree costs tens of seconds before any parsing starts.
+    """
     found: list[Path] = []
-    for path in repo_root.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if language_for(path) is None:
-            continue
-        found.append(path)
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        # in-place mutation is what actually prunes the walk
+        dirnames[:] = [
+            d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")
+        ]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if language_for(path) is not None:
+                found.append(path)
     return found
 
 
@@ -55,11 +66,23 @@ def build_graph(
             )
 
         on_disk = iter_source_files(repo_root)
+        if len(on_disk) > MAX_INDEX_FILES:
+            raise ScopeTooLargeError(
+                f"{repo_root} holds {len(on_disk)} source files "
+                f"(limit {MAX_INDEX_FILES}).\n"
+                "This usually means the folder contains several projects rather "
+                "than one repository — open the specific project instead.\n"
+                "To index it anyway, set PRGRAF_MAX_INDEX_FILES higher."
+            )
+
         seen: set[str] = set()
         parsed = 0
         skipped = 0
+        total = len(on_disk)
 
-        for path in on_disk:
+        for index, path in enumerate(on_disk, start=1):
+            if total > 400 and index % 250 == 0:
+                logger.info(f"parsing {index}/{total} files…")
             rel = path.relative_to(repo_root).as_posix()
             seen.add(rel)
             try:

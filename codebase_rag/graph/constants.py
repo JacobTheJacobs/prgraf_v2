@@ -78,3 +78,9 @@ SKIP_DIRS = frozenset({
 })
 
 MAX_FILE_BYTES = _int_env("PRGRAF_MAX_FILE_BYTES", 1_500_000)
+
+# Refuse to index an absurdly broad scope. Pointing at a folder that holds many
+# unrelated projects (or a home dir) is almost always a mistake, and grinding
+# through it silently looks like a hang. Raise the ceiling deliberately with
+# PRGRAF_MAX_INDEX_FILES if you really do have one huge repo.
+MAX_INDEX_FILES = _int_env("PRGRAF_MAX_INDEX_FILES", 3000)

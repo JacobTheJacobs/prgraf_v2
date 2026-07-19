@@ -49,12 +49,20 @@ function shell(inner) {
       border-radius:50%;margin:0 auto 14px;animation:s 0.8s linear infinite}
     pre{white-space:pre-wrap;text-align:left;color:#f0883e;font-size:12px;
       background:#0a0d12;border:1px solid #232a34;border-radius:8px;padding:12px;margin-top:12px}
+    .detail{margin-top:10px;font-size:11.5px;color:#64707d;
+      font-family:ui-monospace,monospace;word-break:break-word}
     @keyframes s{to{transform:rotate(360deg)}}
   </style></head><body><div class="box">${inner}</div></body></html>`;
 }
 
-function loadingHtml() {
-  return shell(`<div class="spin"></div><div>Building graph and reviewing…</div>`);
+function loadingHtml(detail) {
+  const safe = detail
+    ? String(detail).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))
+    : "";
+  return shell(
+    `<div class="spin"></div><div>Building graph and reviewing…</div>` +
+    (safe ? `<div class="detail">${safe}</div>` : "")
+  );
 }
 
 function errorHtml(msg) {
