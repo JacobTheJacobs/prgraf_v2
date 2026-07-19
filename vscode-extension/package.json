@@ -21,6 +21,16 @@
       {
         "command": "prgraf.reviewPick",
         "title": "prgraf: Review blast radius in…"
+      },
+      {
+        "command": "prgraf.reviewInChat",
+        "title": "prgraf: Review with the agent (MCP)"
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "prgraf.mcpProvider",
+        "label": "prgraf blast-radius graph"
       }
     ],
     "menus": {

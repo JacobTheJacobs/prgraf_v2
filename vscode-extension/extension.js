@@ -34,8 +34,92 @@ const LAST_ROOT_KEY = "prgraf.lastRoot";
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("prgraf.review", () => runReview(context, false)),
-    vscode.commands.registerCommand("prgraf.reviewPick", () => runReview(context, true))
+    vscode.commands.registerCommand("prgraf.reviewPick", () => runReview(context, true)),
+    vscode.commands.registerCommand("prgraf.reviewInChat", () => reviewInChat(context))
   );
+  registerMcpServer(context);
+}
+
+/**
+ * Expose prgraf's MCP server to the editor's agent.
+ *
+ * This is the primary LLM path: the agent calls the graph tools itself
+ * (minimal_context -> review_diff -> trace_symbol) under the token discipline
+ * baked into the server's prompt, rather than us shipping it one pre-built
+ * blob. Same server Claude Code and Cursor use — one implementation.
+ */
+function registerMcpServer(context) {
+  if (!vscode.lm || typeof vscode.lm.registerMcpServerDefinitionProvider !== "function") {
+    return; // older VS Code: the panel still works, just no agent integration
+  }
+  const emitter = new vscode.EventEmitter();
+  context.subscriptions.push(emitter);
+  mcpDidChange = emitter;
+
+  try {
+    context.subscriptions.push(
+      vscode.lm.registerMcpServerDefinitionProvider("prgraf.mcpProvider", {
+        onDidChangeMcpServerDefinitions: emitter.event,
+        provideMcpServerDefinitions: () => {
+          const root = currentRoot(context);
+          if (!root) return [];
+          const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
+          return [
+            new vscode.McpStdioServerDefinition(
+              "prgraf",
+              python,
+              ["-m", "codebase_rag.graph.mcp_server"],
+              // The server reads the repo from PRGRAF_REPO, so the agent's
+              // tools operate on the project the user actually picked.
+              { PRGRAF_REPO: root },
+              undefined
+            ),
+          ];
+        },
+      })
+    );
+  } catch (err) {
+    console.warn("prgraf: MCP registration failed", err);
+  }
+}
+
+let mcpDidChange = null;
+
+/** Best known project root without prompting. */
+function currentRoot(context) {
+  const remembered = context.workspaceState.get(LAST_ROOT_KEY);
+  if (remembered && fs.existsSync(remembered)) return remembered;
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || !folders.length) return null;
+  const first = folders[0].uri.fsPath;
+  if (isProject(first)) return first;
+  const kids = childProjects(first);
+  return kids.length === 1 ? kids[0] : null;
+}
+
+/** Hand the review to the agent, which uses the MCP tools. */
+async function reviewInChat(context) {
+  const root = await resolveProjectRoot(context, false);
+  if (!root) return;
+  await context.workspaceState.update(LAST_ROOT_KEY, root);
+  if (mcpDidChange) mcpDidChange.fire(); // re-resolve the server for this root
+
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  const base = cfg.get("base", "HEAD~1");
+  const query =
+    `Review the blast radius of ${base}..HEAD in ${path.basename(root)} using the ` +
+    `prgraf MCP tools. Start with minimal_context; if the risk is not low, call ` +
+    `review_diff with detail "standard", then trace_symbol on each finding. ` +
+    `Report what could break and what to check first. Keep it under 5 tool calls.`;
+
+  try {
+    await vscode.commands.executeCommand("workbench.action.chat.open", {
+      query,
+      mode: "agent",
+    });
+  } catch (_) {
+    await vscode.commands.executeCommand("workbench.action.chat.open", query);
+  }
 }
 
 function isProject(dir) {
@@ -148,6 +232,9 @@ function locateWebDir(python, cwd) {
 async function runReview(context, forcePick) {
   const root = await resolveProjectRoot(context, forcePick);
   if (!root) return;
+  // Remember it so the MCP server (and the agent) target the same project.
+  await context.workspaceState.update(LAST_ROOT_KEY, root);
+  if (mcpDidChange) mcpDidChange.fire();
 
   const cfg = vscode.workspace.getConfiguration("prgraf");
   const python = cfg.get("pythonPath", "python");
