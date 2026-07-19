@@ -366,11 +366,13 @@ class RadialGraph {
         }
       }
     }
-    // link springs — very gentle; only nudges connected nodes angularly closer
-    // on their ring. Too strong and it collapses the ring structure.
+    // link springs — barely there; a whisper of angular attraction so a
+    // symbol's callers drift near it on the ring, but not enough to pull the
+    // ring into a spiral. Rings stay circular; collision does the spreading.
     for (const l of this.links) {
+      if (l.s.band !== l.t.band) continue; // only same-ring pairs, keeps circles
       const dx = l.t.x - l.s.x, dy = l.t.y - l.s.y;
-      const k = 0.003 * this.alpha;
+      const k = 0.0015 * this.alpha;
       l.s.vx += dx * k; l.s.vy += dy * k;
       l.t.vx -= dx * k; l.t.vy -= dy * k;
     }

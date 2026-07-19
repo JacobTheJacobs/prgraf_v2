@@ -82,9 +82,17 @@ def build_report(
     repo: Path,
     base: str | None = None,
     head: str = "HEAD",
+    engine: str = "graph",
 ) -> str:
     repo = repo.resolve()
     resolved_base = _resolve_base(repo, base)
+
+    if engine == "graph":
+        try:
+            return _graph_report(repo, resolved_base, head)
+        except Exception as exc:  # noqa: BLE001 - CI must still get a report
+            logger.warning(f"graph engine failed ({exc}); falling back to heuristic")
+
     fetcher = RepoFetcher()
     changes = fetcher.fetch_range_diff(repo, base=resolved_base, head=head)
     router = PocketStrategyRouter()
@@ -92,6 +100,18 @@ def build_report(
         {"changes": changes, "base": resolved_base, "head": head},
         repo_root=repo,
     )
+
+
+def _graph_report(repo: Path, base: str, head: str) -> str:
+    """Graph-backed review: same findings the web UI and MCP tools produce."""
+    from codebase_rag.graph.build import build_graph
+    from codebase_rag.graph.review import format_report, review_range
+    from codebase_rag.graph.store import default_db_path
+
+    db = default_db_path(repo)
+    # Incremental: only re-parses changed files after the first build.
+    build_graph(repo, db_path=db)
+    return format_report(review_range(repo, base=base, head=head, db_path=db))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +147,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero when findings meet this threshold",
     )
     parser.add_argument(
+        "--engine",
+        choices=("graph", "heuristic"),
+        default=_env("PRGRAF_ENGINE", default="graph"),
+        help="Review engine: graph (tree-sitter blast radius) or heuristic (regex)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Only print the report (less log noise)",
@@ -145,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     try:
-        report = build_report(repo=repo, base=args.base, head=args.head)
+        report = build_report(repo=repo, base=args.base, head=args.head, engine=args.engine)
     except Exception as exc:
         logger.error(f"Review failed: {exc}")
         print(f"error: {exc}", file=sys.stderr)

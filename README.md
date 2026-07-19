@@ -2,10 +2,19 @@
 
 Low-noise **blast-radius** PR reviewer: what is most likely to break when a PR lands.
 
-Primary use: **template that runs on every PR upload** (GitHub Actions).  
-Optional: local CLI, and a small web UI.
+Built on a real code graph — tree-sitter symbol extraction into SQLite, with a
+bounded bidirectional impact traversal. One self-contained app: a CLI (what CI
+runs), a FastAPI web UI with an Obsidian-style blast-radius graph, and an MCP
+server so an agent can review from a token-minimal context packet.
 
-No LLMs, vector search, Memgraph, or Tree-sitter.
+Surfaces:
+- **PR template** — runs on every PR upload (GitHub Actions), posts a comment.
+- **Web UI** — `prgraf-web`, paste a repo + range, see the blast radius; export a
+  self-contained HTML snapshot.
+- **MCP** — `prgraf-mcp`, graph tools with `detail_level` tiering.
+
+No LLM calls in-product, no vector search, no external graph database. A regex
+heuristic engine remains as `--engine heuristic` fallback.
 
 ## Use as a PR template (recommended)
 
