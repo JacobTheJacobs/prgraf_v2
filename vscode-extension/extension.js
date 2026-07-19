@@ -14,6 +14,7 @@ const cp = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const { renderHtml, loadingHtml, errorHtml } = require("./webview");
+const { callSummary } = require("./summary");
 
 /** Files that mark a directory as "a project you'd review", not a container.
  *  `.git` is checked as a direct child on purpose: walking up finds the
@@ -203,12 +204,19 @@ async function runReview(context, forcePick) {
           payload.base = base;
           payload.head = head;
           const webDir = locateWebDir(python, root);
-          panel.webview.html = webDir
-            ? renderHtml(webDir, payload)
-            : errorHtml(
-                "prgraf package not found for the configured interpreter.\n" +
-                "Run: pip install -e .   (or set prgraf.pythonPath)"
-              );
+          if (!webDir) {
+            panel.webview.html = errorHtml(
+              "prgraf package not found for the configured interpreter.\n" +
+              "Run: pip install -e .   (or set prgraf.pythonPath)"
+            );
+            resolve();
+            return;
+          }
+          panel.webview.html = renderHtml(webDir, payload);
+          // Narration is additive: the graph is already usable without it.
+          if (cfg.get("summary", true) && (payload.findings || []).length) {
+            narrate(panel, payload);
+          }
           resolve();
         });
 
@@ -237,6 +245,21 @@ async function runReview(context, forcePick) {
           vscode.window.setStatusBarMessage(`prgraf: could not open ${msg.file}`, 3000);
         });
     }
+  });
+}
+
+/** Ask the language model to explain the already-computed findings, then push
+ *  the prose into the panel. Failure is non-fatal — the graph stands alone. */
+function narrate(panel, payload) {
+  const cts = new vscode.CancellationTokenSource();
+  panel.onDidDispose(() => cts.cancel());
+  panel.webview.postMessage({ type: "summary-pending" });
+  callSummary(vscode, payload, cts.token).then((res) => {
+    panel.webview.postMessage({
+      type: "summary",
+      text: res.text || "",
+      error: res.error || "",
+    });
   });
 }
 

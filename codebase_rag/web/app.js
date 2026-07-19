@@ -49,7 +49,36 @@ document.addEventListener("DOMContentLoaded", () => {
   // immediately and swap the live controls for a read-only snapshot note.
   // Same renderer as live mode — no second implementation to drift.
   if (window.__PRGRAF_DATA__) enterEmbeddedMode(window.__PRGRAF_DATA__);
+
+  // The VSCode host pushes an LLM narration in after the graph renders.
+  window.addEventListener("message", (event) => {
+    const msg = event.data || {};
+    if (msg.type === "summary-pending") renderSummary(null, null, true);
+    if (msg.type === "summary") renderSummary(msg.text, msg.error, false);
+  });
 });
+
+function renderSummary(text, error, pending) {
+  const box = $("summary");
+  if (!box) return;
+  if (pending) {
+    box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span>
+      <span class="sum-wait">reading the graph…</span></div>`;
+    box.classList.remove("hidden");
+    return;
+  }
+  if (error) {
+    box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>
+      <p class="sum-error">${escapeHtml(error)}</p>`;
+    box.classList.remove("hidden");
+    return;
+  }
+  if (!text) { box.classList.add("hidden"); return; }
+  const paras = String(text).split(/\n\s*\n/).filter(Boolean)
+    .map((p) => `<p>${escapeHtml(p)}</p>`).join("");
+  box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>${paras}`;
+  box.classList.remove("hidden");
+}
 
 function enterEmbeddedMode(payload) {
   const controls = document.querySelector(".controls");

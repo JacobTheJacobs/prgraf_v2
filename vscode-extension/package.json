@@ -6,7 +6,7 @@
   "publisher": "jacobthejacobs",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.90.0"
   },
   "categories": ["SCM Providers", "Visualization"],
   "activationEvents": [],
@@ -44,6 +44,11 @@
           "type": "string",
           "default": "",
           "description": "Project to graph. Leave empty to auto-detect (asks only when the open folder holds several projects). Absolute, or relative to the workspace folder."
+        },
+        "prgraf.summary": {
+          "type": "boolean",
+          "default": true,
+          "description": "Explain the blast radius in prose using VS Code's built-in language model (GitHub Copilot). The model receives only the computed graph facts — never your diff or file contents."
         },
         "prgraf.base": {
           "type": "string",
