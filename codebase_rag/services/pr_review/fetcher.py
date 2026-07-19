@@ -28,33 +28,66 @@ class RepoFetcher:
         self._git(["git", "fetch", "origin", f"pull/{pr_number}/head:{branch}"], cwd=repo_path)
 
         base = self._detect_base(repo_path, branch)
-        files = self._git(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=repo_path).stdout.splitlines()
+        return self.fetch_range_diff(repo_path, base=base, head=branch)
+
+    def fetch_range_diff(
+        self,
+        repo_path: Path,
+        base: str,
+        head: str = "HEAD",
+    ) -> list[dict]:
+        """Build change list from an already-checked-out git range (CI-friendly)."""
+        repo_path = Path(repo_path)
+        merge_base = self._git(
+            ["git", "merge-base", base, head],
+            cwd=repo_path,
+            check=False,
+        ).stdout.strip()
+        if not merge_base:
+            merge_base = base
+
+        files = self._git(
+            ["git", "diff", "--name-only", f"{merge_base}...{head}"],
+            cwd=repo_path,
+        ).stdout.splitlines()
 
         changes = []
         for file_path in [file.strip() for file in files if file.strip()]:
-            merge_base = self._git(["git", "merge-base", base, branch], cwd=repo_path).stdout.strip()
             changes.append(
                 {
                     "file": file_path,
                     "old_content": self._show(repo_path, merge_base, file_path),
-                    "new_content": self._show(repo_path, branch, file_path),
+                    "new_content": self._show(repo_path, head, file_path),
                 }
             )
 
-        logger.info(f"Detected {len(changes)} changed file(s)")
+        logger.info(f"Detected {len(changes)} changed file(s) ({merge_base[:12]}...{head})")
         return changes
 
     def _detect_base(self, repo_path: Path, branch: str) -> str:
-        for base in ("main", "master"):
-            result = self._git(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=repo_path, check=False)
+        for base in ("main", "master", "origin/main", "origin/master"):
+            result = self._git(
+                ["git", "diff", "--name-only", f"{base}...{branch}"],
+                cwd=repo_path,
+                check=False,
+            )
             if result.returncode == 0:
                 return base
         return "HEAD"
 
     def _show(self, repo_path: Path, ref: str, file_path: str) -> str:
-        return self._git(["git", "show", f"{ref}:{file_path}"], cwd=repo_path, check=False).stdout
+        return self._git(
+            ["git", "show", f"{ref}:{file_path}"],
+            cwd=repo_path,
+            check=False,
+        ).stdout
 
-    def _git(self, cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def _git(
+        self,
+        cmd: list[str],
+        cwd: Path | None = None,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd,
             cwd=cwd,

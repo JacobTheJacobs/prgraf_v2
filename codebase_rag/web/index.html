@@ -1,37 +1,107 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Blast-Radius PR Reviewer</title>
+    <title>prgraf · blast-radius review</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
-    <main>
-        <header>
-            <p class="eyebrow">Pre-Landing Review</p>
-            <h1>Blast-Radius PR Reviewer</h1>
-            <p class="lede">Low-noise guesses about what might break when this PR lands.</p>
-        </header>
+    <div id="app">
+        <aside id="sidebar">
+            <header class="brand">
+                <div class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="22" height="22">
+                        <circle cx="12" cy="12" r="3" class="bm-core" />
+                        <circle cx="12" cy="12" r="7" class="bm-ring" />
+                        <circle cx="12" cy="12" r="10.5" class="bm-ring bm-ring-faint" />
+                    </svg>
+                </div>
+                <div>
+                    <h1>prgraf</h1>
+                    <p class="tagline">blast-radius review</p>
+                </div>
+            </header>
 
-        <section class="card">
-            <div class="form-row">
-                <input id="pr-url" type="text" placeholder="https://github.com/owner/repo/pull/123">
-                <button id="analyze-btn">Run Review</button>
-            </div>
-            <pre id="review-output">Enter a PR URL to get the top blast-radius findings.</pre>
-        </section>
+            <section class="controls">
+                <label class="field">
+                    <span>Repository path</span>
+                    <input id="repo-path" type="text" value="." spellcheck="false"
+                        placeholder="/path/to/repo or ." autocomplete="off">
+                </label>
+                <div class="field-row">
+                    <label class="field">
+                        <span>Base</span>
+                        <input id="base-ref" type="text" value="HEAD~1" spellcheck="false">
+                    </label>
+                    <label class="field">
+                        <span>Head</span>
+                        <input id="head-ref" type="text" value="HEAD" spellcheck="false">
+                    </label>
+                </div>
+                <button id="review-btn" class="primary">
+                    <span class="btn-label">Run review</span>
+                    <span class="spinner" aria-hidden="true"></span>
+                </button>
+                <p id="status-line" class="status-line">Not built yet.</p>
+            </section>
 
-        <section class="logs">
-            <div class="logs-header">
-                <span>Logs</span>
-                <button id="refresh-logs-btn">Refresh</button>
+            <section id="verdict" class="verdict hidden" aria-live="polite"></section>
+
+            <section id="findings" class="findings" aria-label="Findings"></section>
+
+            <footer class="side-footer">
+                <button id="theme-toggle" class="ghost" title="Toggle theme">
+                    <span class="theme-icon">◐</span>
+                </button>
+                <details class="logs">
+                    <summary>Logs</summary>
+                    <pre id="log-area"></pre>
+                </details>
+            </footer>
+        </aside>
+
+        <main id="stage">
+            <div id="graph-toolbar" class="graph-toolbar hidden">
+                <div class="legend" id="legend"></div>
+                <div class="toolbar-actions">
+                    <button id="fit-btn" class="ghost" title="Fit to view">Fit</button>
+                    <label class="toggle">
+                        <input type="checkbox" id="labels-toggle" checked>
+                        <span>Labels</span>
+                    </label>
+                </div>
             </div>
-            <pre id="log-area"></pre>
-        </section>
-    </main>
+
+            <svg id="graph" role="img" aria-label="Blast-radius graph">
+                <g id="viewport">
+                    <g id="rings"></g>
+                    <g id="edges"></g>
+                    <g id="nodes"></g>
+                </g>
+            </svg>
+
+            <div id="empty-state" class="empty-state">
+                <div class="empty-art" aria-hidden="true">
+                    <svg viewBox="0 0 200 200" width="180" height="180">
+                        <circle cx="100" cy="100" r="70" class="es-ring es-r3" />
+                        <circle cx="100" cy="100" r="46" class="es-ring es-r2" />
+                        <circle cx="100" cy="100" r="24" class="es-ring es-r1" />
+                        <circle cx="100" cy="100" r="6" class="es-core" />
+                    </svg>
+                </div>
+                <h2>What breaks when this lands?</h2>
+                <p>Point at a repo, pick a range, run the review. Changed symbols
+                    sit at the center; everything they might break rings outward,
+                    closest first.</p>
+            </div>
+
+            <div id="detail-panel" class="detail-panel hidden" role="dialog" aria-label="Symbol detail"></div>
+            <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+        </main>
+    </div>
 
     <script src="app.js"></script>
 </body>

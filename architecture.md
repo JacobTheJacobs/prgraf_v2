@@ -1,15 +1,23 @@
 # Architecture
 
-`prgraf` is intentionally small.
+`prgraf` is intentionally small. Primary path is **CLI on every PR** via the template workflow.
 
 ```text
+GitHub pull_request (opened / synchronize / …)
+  -> template/.github/workflows/pr-blast-radius.yml
+     -> prgraf --base origin/$BASE --head HEAD
+        -> RepoFetcher.fetch_range_diff
+        -> PocketStrategyRouter
+           -> StructuralTriage
+           -> deleted-file reference scan
+           -> touched-symbol reference scan
+        -> prgraf-report.md + PR comment
+
+Optional web:
 POST /api/analyze
   -> PRService
-     -> RepoFetcher, if repo_url + pr_number were provided
+     -> RepoFetcher (range | remote PR | supplied changes)
      -> PocketStrategyRouter
-        -> StructuralTriage
-        -> deleted-file reference scan
-        -> touched-symbol reference scan
   -> concise Pre-Landing Review
 ```
 

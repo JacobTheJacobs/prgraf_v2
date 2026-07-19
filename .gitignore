@@ -23,3 +23,9 @@ PROJECT.md
 .envrc
 .DS_Store
 .pypi_cache.json
+.gstack/
+
+# prgraf runtime artifacts
+.prgraf/
+prgraf-report.md
+temp_repos/
