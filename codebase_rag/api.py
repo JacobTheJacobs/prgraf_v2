@@ -7,13 +7,15 @@ the SQLite graph.
 
 from __future__ import annotations
 
+import json
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -145,6 +147,44 @@ async def review(request: Request):
         }
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Review failed: {exc}")
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/export")
+async def export(request: Request):
+    """Assemble a single self-contained HTML snapshot of a review.
+
+    Inlines style.css, app.js, and the review payload into one file that
+    renders offline with no server — the same app.js drives it in embedded
+    mode, so there is no second renderer to keep in sync.
+    """
+    try:
+        data = await request.json()
+        payload = data.get("payload")
+        if not payload:
+            raise ValueError("export needs a review payload")
+
+        web = Path(__file__).parent / "web"
+        index_html = (web / "index.html").read_text(encoding="utf-8")
+        css = (web / "style.css").read_text(encoding="utf-8")
+        js = (web / "app.js").read_text(encoding="utf-8")
+
+        payload = dict(payload)
+        payload.setdefault("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        # </script> inside JSON would close the tag early; escape it.
+        data_json = json.dumps(payload).replace("</", "<\\/")
+
+        html = index_html.replace(
+            '<link rel="stylesheet" href="style.css">',
+            f"<style>\n{css}\n</style>",
+        ).replace(
+            '<script src="app.js"></script>',
+            f"<script>window.__PRGRAF_DATA__ = {data_json};</script>\n"
+            f"<script>\n{js}\n</script>",
+        )
+        return HTMLResponse(content=html)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Export failed: {exc}")
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 

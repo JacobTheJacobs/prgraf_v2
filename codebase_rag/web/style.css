@@ -235,6 +235,49 @@ button.primary.loading .btn-label {
     min-height: 16px;
 }
 
+#export-btn {
+    width: 100%;
+    padding: 9px;
+}
+
+/* embedded-snapshot note (replaces controls in exported HTML) */
+.snapshot-note {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.snap-tag {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    width: fit-content;
+    padding: 2px 7px;
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    margin-bottom: 4px;
+}
+
+.snap-repo {
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    color: var(--text);
+    word-break: break-all;
+}
+
+.snap-range {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.snap-when {
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-top: 2px;
+}
+
 .ghost {
     background: transparent;
     border: 1px solid var(--border);

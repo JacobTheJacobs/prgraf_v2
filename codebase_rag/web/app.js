@@ -40,9 +40,33 @@ document.addEventListener("DOMContentLoaded", () => {
   el.svg.addEventListener("click", (e) => { if (e.target === el.svg) closeDetail(); });
   [el.repo, el.base, el.head].forEach((i) =>
     i.addEventListener("keydown", (e) => { if (e.key === "Enter") runReview(); }));
+  const exportBtn = $("export-btn");
+  if (exportBtn) exportBtn.addEventListener("click", exportReport);
 
   initPanZoom();
+
+  // Embedded mode: a shared static snapshot inlines its data. Render it
+  // immediately and swap the live controls for a read-only snapshot note.
+  // Same renderer as live mode — no second implementation to drift.
+  if (window.__PRGRAF_DATA__) enterEmbeddedMode(window.__PRGRAF_DATA__);
 });
+
+function enterEmbeddedMode(payload) {
+  const controls = document.querySelector(".controls");
+  if (controls) {
+    const when = payload.generated_at || "";
+    controls.innerHTML = `
+      <div class="snapshot-note">
+        <span class="snap-tag">SNAPSHOT</span>
+        <div class="snap-repo">${escapeHtml(payload.repo || "")}</div>
+        <div class="snap-range">${escapeHtml(payload.base || "")} … ${escapeHtml(payload.head || "HEAD")}</div>
+        ${when ? `<div class="snap-when">${escapeHtml(when)}</div>` : ""}
+      </div>`;
+  }
+  const exportBtn = $("export-btn");
+  if (exportBtn) exportBtn.remove();
+  render(payload);
+}
 
 /* ---------------- data flow ---------------- */
 
@@ -61,9 +85,12 @@ async function runReview() {
     });
     const data = await res.json();
     if (!res.ok || data.status === "error") throw new Error(data.message || `HTTP ${res.status}`);
+    window.__lastReview = { ...data, repo: body.repo_path, base: body.base, head: body.head };
     render(data);
     el.status.textContent =
       `${data.findings.length} finding(s) · ${data.graph.nodes.length} nodes in radius`;
+    const exportBtn = $("export-btn");
+    if (exportBtn) exportBtn.classList.remove("hidden");
   } catch (err) {
     el.status.textContent = `Failed: ${err.message}`;
   } finally {
@@ -528,6 +555,36 @@ function setLoading(on) {
 function toggleTheme() {
   const root = document.documentElement;
   root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+}
+
+async function exportReport() {
+  const last = window.__lastReview;
+  if (!last) return;
+  const btn = $("export-btn");
+  const label = btn.textContent;
+  btn.textContent = "Building…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payload: last }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `prgraf-review-${stamp}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    el.status.textContent = `Export failed: ${err.message}`;
+  } finally {
+    btn.textContent = label;
+    btn.disabled = false;
+  }
 }
 
 async function fetchLogs() {
