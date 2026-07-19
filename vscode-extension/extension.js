@@ -14,7 +14,7 @@ const cp = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const { renderHtml, loadingHtml, errorHtml } = require("./webview");
-const { callSummary } = require("./summary");
+const { callSummary, listModels } = require("./summary");
 
 /** Files that mark a directory as "a project you'd review", not a container.
  *  `.git` is checked as a direct child on purpose: walking up finds the
@@ -35,9 +35,81 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("prgraf.review", () => runReview(context, false)),
     vscode.commands.registerCommand("prgraf.reviewPick", () => runReview(context, true)),
-    vscode.commands.registerCommand("prgraf.reviewInChat", () => reviewInChat(context))
+    vscode.commands.registerCommand("prgraf.reviewInChat", () => reviewInChat(context)),
+    vscode.commands.registerCommand("prgraf.chooseModel", () => chooseModel()),
+    vscode.commands.registerCommand("prgraf.writeMcpConfig", () => writeMcpConfig(context))
   );
   registerMcpServer(context);
+}
+
+/** Let the user pick which chat model narrates — any vendor the editor has. */
+async function chooseModel() {
+  const models = await listModels(vscode);
+  if (!models.length) {
+    vscode.window.showWarningMessage(
+      "prgraf: no chat models are available to this editor. The graph works without one."
+    );
+    return;
+  }
+  const items = models.map((m) => ({
+    label: m.name || `${m.vendor}/${m.family}`,
+    description: `${m.vendor}/${m.family}`,
+    detail: m.maxInputTokens ? `${m.maxInputTokens} max input tokens` : "",
+    value: `${m.vendor}/${m.family}`,
+  }));
+  items.unshift({ label: "Auto", description: "first available", detail: "", value: "" });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Which model should write the impact summary?",
+  });
+  if (!pick) return;
+  await vscode.workspace
+    .getConfiguration("prgraf")
+    .update("model", pick.value, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`prgraf summary model: ${pick.label}`);
+}
+
+/**
+ * Write .mcp.json so agents that read project MCP config (Claude Code,
+ * Cursor, others) can use the same prgraf server. The VS Code provider
+ * only covers VS Code's own agent.
+ */
+async function writeMcpConfig(context) {
+  const root = await resolveProjectRoot(context, false);
+  if (!root) return;
+  const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
+  const target = path.join(root, ".mcp.json");
+
+  let existing = {};
+  if (fs.existsSync(target)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch (_) {
+      const overwrite = await vscode.window.showWarningMessage(
+        `${target} exists but is not valid JSON. Overwrite?`, "Overwrite", "Cancel"
+      );
+      if (overwrite !== "Overwrite") return;
+    }
+  }
+  const merged = {
+    ...existing,
+    mcpServers: {
+      ...(existing.mcpServers || {}),
+      prgraf: {
+        command: python,
+        args: ["-m", "codebase_rag.graph.mcp_server"],
+        env: { PRGRAF_REPO: root },
+      },
+    },
+  };
+  fs.writeFileSync(target, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  const open = await vscode.window.showInformationMessage(
+    `prgraf: wrote ${path.basename(target)} — agents reading project MCP config can now use the graph tools.`,
+    "Open"
+  );
+  if (open === "Open") {
+    vscode.window.showTextDocument(vscode.Uri.file(target));
+  }
 }
 
 /**
@@ -302,7 +374,7 @@ async function runReview(context, forcePick) {
           panel.webview.html = renderHtml(webDir, payload);
           // Narration is additive: the graph is already usable without it.
           if (cfg.get("summary", true) && (payload.findings || []).length) {
-            narrate(panel, payload);
+            narrate(panel, payload, cfg.get("model", ""));
           }
           resolve();
         });
@@ -337,11 +409,11 @@ async function runReview(context, forcePick) {
 
 /** Ask the language model to explain the already-computed findings, then push
  *  the prose into the panel. Failure is non-fatal — the graph stands alone. */
-function narrate(panel, payload) {
+function narrate(panel, payload, preferred) {
   const cts = new vscode.CancellationTokenSource();
   panel.onDidDispose(() => cts.cancel());
   panel.webview.postMessage({ type: "summary-pending" });
-  callSummary(vscode, payload, cts.token).then((res) => {
+  callSummary(vscode, payload, cts.token, preferred).then((res) => {
     panel.webview.postMessage({
       type: "summary",
       text: res.text || "",

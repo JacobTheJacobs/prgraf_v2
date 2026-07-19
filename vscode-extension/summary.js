@@ -104,23 +104,43 @@ function shortName(p) {
  * Run the narration through VS Code's language model API.
  * Returns { text } or { error } — never throws.
  */
-async function callSummary(vscode, payload, token) {
-  let models;
+async function listModels(vscode) {
   try {
-    models = await vscode.lm.selectChatModels({ vendor: "copilot" });
-  } catch (err) {
-    return { error: `Language model unavailable: ${err && err.message ? err.message : err}` };
+    // No vendor filter on purpose: return whatever this editor actually has —
+    // Copilot, Claude, or anything another extension registered.
+    return (await vscode.lm.selectChatModels()) || [];
+  } catch (_) {
+    return [];
   }
-  if (!models || !models.length) {
+}
+
+/** Match a saved preference against id, family, or "vendor/family". */
+function matchModel(models, preferred) {
+  if (!preferred) return null;
+  const want = String(preferred).toLowerCase();
+  return (
+    models.find((m) => String(m.id).toLowerCase() === want) ||
+    models.find((m) => `${m.vendor}/${m.family}`.toLowerCase() === want) ||
+    models.find((m) => String(m.family).toLowerCase() === want) ||
+    models.find((m) => String(m.vendor).toLowerCase() === want) ||
+    null
+  );
+}
+
+async function callSummary(vscode, payload, token, preferred) {
+  const models = await listModels(vscode);
+  if (!models.length) {
     return {
       error:
-        "No language model available. This uses VS Code's built-in model " +
-        "(GitHub Copilot). Sign in to Copilot, or turn the summary off with " +
-        "prgraf.summary = false.",
+        "No language model is available to this editor. prgraf uses whichever " +
+        "chat model VS Code exposes — it does not require any particular vendor. " +
+        "Either sign in to a chat provider, or use the MCP path instead " +
+        "('prgraf: Review with the agent (MCP)'), or set prgraf.summary = false. " +
+        "The graph itself needs no model at all.",
     };
   }
 
-  const model = models[0];
+  const model = matchModel(models, preferred) || models[0];
   const messages = [
     vscode.LanguageModelChatMessage.User(`${SYSTEM}\n\n---\n\n${buildPrompt(payload)}`),
   ];
@@ -129,11 +149,11 @@ async function callSummary(vscode, payload, token) {
     const response = await model.sendRequest(messages, {}, token);
     let text = "";
     for await (const chunk of response.text) text += chunk;
-    return { text: text.trim() };
+    return { text: text.trim(), model: `${model.vendor}/${model.family}` };
   } catch (err) {
     // Consent refusal and quota both land here; surface, never crash the panel.
-    return { error: `Summary failed: ${err && err.message ? err.message : err}` };
+    return { error: `Summary failed via ${model.vendor}/${model.family}: ${err && err.message ? err.message : err}` };
   }
 }
 
-module.exports = { buildPrompt, callSummary, SYSTEM };
+module.exports = { buildPrompt, callSummary, listModels, matchModel, SYSTEM };

@@ -25,6 +25,14 @@
       {
         "command": "prgraf.reviewInChat",
         "title": "prgraf: Review with the agent (MCP)"
+      },
+      {
+        "command": "prgraf.chooseModel",
+        "title": "prgraf: Choose summary model"
+      },
+      {
+        "command": "prgraf.writeMcpConfig",
+        "title": "prgraf: Write .mcp.json (Claude Code, Cursor, …)"
       }
     ],
     "mcpServerDefinitionProviders": [
@@ -58,7 +66,12 @@
         "prgraf.summary": {
           "type": "boolean",
           "default": true,
-          "description": "Explain the blast radius in prose using VS Code's built-in language model (GitHub Copilot). The model receives only the computed graph facts — never your diff or file contents."
+          "description": "Explain the blast radius in prose using whatever chat model this editor exposes. The model receives only the computed graph facts — never your diff or file contents. The graph works without any model."
+        },
+        "prgraf.model": {
+          "type": "string",
+          "default": "",
+          "description": "Which chat model writes the summary — an id, family, or \"vendor/family\" (e.g. \"anthropic/claude-sonnet-4.5\", \"copilot/gpt-4o\"). Empty means use the first available. Pick interactively with 'prgraf: Choose summary model'."
         },
         "prgraf.base": {
           "type": "string",
