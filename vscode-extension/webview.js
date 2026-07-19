@@ -55,19 +55,19 @@ function shell(inner) {
   </style></head><body><div class="box">${inner}</div></body></html>`;
 }
 
-function loadingHtml(detail) {
-  const safe = detail
-    ? String(detail).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))
-    : "";
+const esc = (s) =>
+  String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+function loadingHtml(project, detail) {
+  const who = project ? ` <b>${esc(project)}</b>` : "";
   return shell(
-    `<div class="spin"></div><div>Building graph and reviewing…</div>` +
-    (safe ? `<div class="detail">${safe}</div>` : "")
+    `<div class="spin"></div><div>Building graph for${who} …</div>` +
+    (detail ? `<div class="detail">${esc(detail)}</div>` : "")
   );
 }
 
 function errorHtml(msg) {
-  const safe = String(msg).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  return shell(`<div>prgraf couldn't produce a review.</div><pre>${safe}</pre>`);
+  return shell(`<div>prgraf couldn't produce a review.</div><pre>${esc(msg)}</pre>`);
 }
 
 module.exports = { renderHtml, loadingHtml, errorHtml, nonce };
