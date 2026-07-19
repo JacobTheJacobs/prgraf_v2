@@ -68,8 +68,6 @@ IMPACT_SCORE_FLOOR = _bounded_float_env(
     "PRGRAF_IMPACT_SCORE_FLOOR", 0.05, lower=0.0, upper=1.0
 )
 
-NODE_KINDS = ("File", "Class", "Function", "Type", "Test")
-
 SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
     "node_modules", "dist", "build", "target", "vendor", ".next",
