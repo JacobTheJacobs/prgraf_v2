@@ -231,24 +231,29 @@ class RadialGraph {
     this.ringRadii = ringRadii;
     this.maxRingR = prevR;
 
-    // seeds: a small central rosette sized to their count
+    // seeds: central rosette sized so dots never overlap, and pushed inside
+    // the innermost ring. Finding-driver seeds sort first so they land at the
+    // top of the rosette where their labels have clear air.
     const seeds = this.nodes.filter((n) => n.isSeed);
-    const seedR = seeds.length > 1 ? Math.min(46, (seeds.length * 20) / (2 * Math.PI)) : 0;
+    seeds.sort((a, b) => (this.riskRank(b) - this.riskRank(a)) || (b.score - a.score));
+    const innerRing = ringRadii[Math.min(...Object.keys(ringRadii).map(Number))] || 140;
+    const seedR = seeds.length > 1
+      ? Math.min(innerRing - 40, Math.max(30, (seeds.length * 22) / (2 * Math.PI)))
+      : 0;
     seeds.forEach((n, i) => {
-      const a = (i / Math.max(1, seeds.length)) * Math.PI * 2;
+      const a = -Math.PI / 2 + (i / Math.max(1, seeds.length)) * Math.PI * 2;
       n.angle = a; n.targetR = seedR;
       n.x = this.cx + Math.cos(a) * seedR;
       n.y = this.cy + Math.sin(a) * seedR;
     });
+    this.seedR = seedR;
 
-    // Label budget: top-risk seeds + highest-impact few. The rest stay quiet
-    // until hovered — quiet is what makes the picture readable.
-    const topSeeds = seeds.slice()
-      .sort((a, b) => (this.riskRank(b) - this.riskRank(a)) || (b.score - a.score))
-      .slice(0, 6);
+    // Label budget: finding-driver seeds always (they are the review's point),
+    // plus the highest-impact few. Everything else stays quiet until hovered.
+    const findingSeeds = seeds.filter((n) => this.riskBySymbol[n.id]);
     const topImpact = this.nodes.filter((n) => !n.isSeed)
-      .sort((a, b) => b.score - a.score).slice(0, 10);
-    const labelled = new Set([...topSeeds, ...topImpact].map((n) => n.id));
+      .sort((a, b) => b.score - a.score).slice(0, 8);
+    const labelled = new Set([...findingSeeds, ...topImpact].map((n) => n.id));
     for (const n of this.nodes) n.labelled = labelled.has(n.id);
 
     this.byId = new Map(this.nodes.map((n) => [n.id, n]));
@@ -268,6 +273,12 @@ class RadialGraph {
 
     // one guide circle per populated band, labeled by what the ring means
     const bandName = { 0: "direct", 1: "~2 hops", 2: "~3 hops", 3: "faint" };
+    if (this.seedR > 4) {
+      rings.appendChild(mk("circle", { cx: this.cx, cy: this.cy, r: this.seedR, class: "ring-guide" }));
+      const sl = mk("text", { x: this.cx, y: this.cy - this.seedR - 5, class: "ring-label", "text-anchor": "middle" });
+      sl.textContent = "changed";
+      rings.appendChild(sl);
+    }
     for (const band of Object.keys(this.ringRadii)) {
       const r = this.ringRadii[band];
       rings.appendChild(mk("circle", { cx: this.cx, cy: this.cy, r, class: "ring-guide" }));
