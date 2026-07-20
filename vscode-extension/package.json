@@ -1,0 +1,145 @@
+{
+  "name": "prgraf",
+  "displayName": "prgraf — blast-radius review",
+  "description": "See what a change might break: an Obsidian-style blast-radius graph of your working diff, inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "jacobthejacobs",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["SCM Providers", "Visualization"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "prgraf.review",
+        "title": "prgraf: Review blast radius",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "prgraf.reviewPick",
+        "title": "prgraf: Review blast radius in…",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "prgraf.reviewInChat",
+        "title": "prgraf: Review with the agent (MCP)"
+      },
+      {
+        "command": "prgraf.chooseModel",
+        "title": "prgraf: Choose summary model"
+      },
+      {
+        "command": "prgraf.chooseAgent",
+        "title": "prgraf: Choose agent (Claude, Codex, Gemini, Grok, …)"
+      },
+      {
+        "command": "prgraf.writeMcpConfig",
+        "title": "prgraf: Write .mcp.json (Claude Code, Cursor, …)"
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "prgraf.mcpProvider",
+        "label": "prgraf blast-radius graph"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prgraf",
+          "title": "prgraf",
+          "icon": "media/prgraf.svg"
+        }
+      ]
+    },
+    "views": {
+      "prgraf": [
+        {
+          "id": "prgraf.findings",
+          "name": "Blast radius",
+          "icon": "media/prgraf.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "prgraf.findings",
+        "contents": "See what a change might break.\n[Review blast radius](command:prgraf.review)\nChanged symbols sit at the centre; everything they reach rings outward, closest first.\n\nWant an agent to dig in? [pick one](command:prgraf.chooseAgent) — Claude Code, Codex, Gemini, Grok, opencode, or VS Code chat — then [hand it the findings](command:prgraf.reviewInChat)."
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "prgraf.review",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "prgraf.review",
+          "when": "view == prgraf.findings",
+          "group": "navigation"
+        },
+        {
+          "command": "prgraf.reviewPick",
+          "when": "view == prgraf.findings",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "prgraf",
+      "properties": {
+        "prgraf.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter that has the prgraf package installed (pip install -e .)."
+        },
+        "prgraf.projectRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Project to graph. Leave empty to auto-detect (asks only when the open folder holds several projects). Absolute, or relative to the workspace folder."
+        },
+        "prgraf.summary": {
+          "type": "boolean",
+          "default": true,
+          "description": "Explain the blast radius in prose using whatever chat model this editor exposes. The model receives only the computed graph facts — never your diff or file contents. The graph works without any model."
+        },
+        "prgraf.agent": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "vscode", "claude", "codex", "gemini", "grok", "opencode"],
+          "enumDescriptions": [
+            "First agent CLI found on PATH",
+            "VS Code's built-in chat (agent mode)",
+            "Claude Code",
+            "Codex",
+            "Gemini CLI",
+            "Grok CLI",
+            "opencode"
+          ],
+          "description": "Which agent gets the findings when you run 'Review with the agent'. All of them read .mcp.json, so each one gets prgraf's graph tools."
+        },
+        "prgraf.model": {
+          "type": "string",
+          "default": "",
+          "description": "Which chat model writes the summary — an id, family, or \"vendor/family\" (e.g. \"anthropic/claude-sonnet-4.5\", \"copilot/gpt-4o\"). Empty means use the first available. Pick interactively with 'prgraf: Choose summary model'."
+        },
+        "prgraf.base": {
+          "type": "string",
+          "default": "HEAD~1",
+          "description": "Default base ref to diff the working tree against."
+        },
+        "prgraf.head": {
+          "type": "string",
+          "default": "HEAD",
+          "description": "Head ref to review."
+        }
+      }
+    }
+  }
+}

@@ -1,17 +1,27 @@
 [project]
 name = "prgraf"
-version = "0.1.0"
-description = "Low-noise blast-radius PR reviewer"
+version = "0.2.0"
+description = "Low-noise blast-radius PR reviewer (CLI + PR template)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.110.0",
     "loguru>=0.7.3",
+    "tree-sitter-language-pack>=0.9.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
+]
+mcp = [
+    "mcp>=1.2.0",
 ]
 
 [project.scripts]
-prgraf = "codebase_rag.api:main"
+prgraf = "codebase_rag.cli:main"
+prgraf-web = "codebase_rag.api:main"
+prgraf-mcp = "codebase_rag.graph.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["codebase_rag*"]
