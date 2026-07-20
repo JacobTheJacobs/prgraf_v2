@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from codebase_rag.graph.build import build_graph
+from codebase_rag.graph.pr import parse_pr_url, prepare_pr
 from codebase_rag.graph.review import review_range, web_payload
 from codebase_rag.graph.store import GraphStore, default_db_path
 
@@ -74,17 +75,35 @@ async def review(request: Request):
     """Review a range. Returns the full blast-radius subgraph for rendering."""
     try:
         data = await request.json()
-        repo = _resolve_repo(data.get("repo_path"))
-        db = default_db_path(repo)
-        if not db.exists():
-            logger.info("No graph yet — building before review")
-            build_graph(repo, db_path=db, full=True)
-
+        raw = (data.get("repo_path") or "").strip()
         base = data.get("base") or "HEAD~1"
         head = data.get("head") or "HEAD"
+        pr_slug = None
+
+        # One field accepts either a local path or a GitHub PR URL; a PR just
+        # resolves to a range, so the rest of the pipeline is unchanged.
+        pr = parse_pr_url(raw) or parse_pr_url(data.get("pr_url") or "")
+        if pr:
+            repo, base, head = prepare_pr(pr, local_repo=data.get("local_repo"))
+            pr_slug = pr.slug
+        else:
+            repo = _resolve_repo(raw)
+
+        # Always refresh: the build is hash-incremental and cheap, and a graph
+        # left from a different checkout has stale line numbers, which silently
+        # maps the diff onto the wrong symbols.
+        db = default_db_path(repo)
+        build_graph(repo, db_path=db)
+
         render_cap = int(data.get("render_cap") or 160)
         result = review_range(repo, base=base, head=head, db_path=db)
-        return web_payload(result, cap=render_cap)
+        payload = web_payload(result, cap=render_cap)
+        payload["repo"] = str(repo)
+        payload["base"] = base
+        payload["head"] = head
+        if pr_slug:
+            payload["pr"] = pr_slug
+        return payload
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Review failed: {exc}")
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)

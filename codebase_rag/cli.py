@@ -97,6 +97,20 @@ def _should_fail(report: str, fail_on: str) -> bool:
     return False
 
 
+def review_pr_url(url: str, local_repo: Path | None = None) -> str:
+    """Review a GitHub PR by URL: fetch it, then review it like any range."""
+    from codebase_rag.graph.pr import parse_pr_url, prepare_pr
+
+    pr = parse_pr_url(url)
+    if pr is None:
+        raise ValueError(f"not a GitHub PR URL: {url!r}")
+    repo, base, head = prepare_pr(pr, local_repo=local_repo)
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db)
+    report = format_report(review_range(repo, base=base, head=head, db_path=db))
+    return f"{pr.slug}\n{report}"
+
+
 def build_report(repo: Path, base: str | None = None, head: str = "HEAD") -> str:
     """Graph-backed review: the same findings the UI and MCP tools produce.
 
@@ -146,6 +160,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero when findings meet this threshold",
     )
     parser.add_argument(
+        "--pr",
+        default=_env("PRGRAF_PR"),
+        help="Review a GitHub PR by URL (https://github.com/owner/repo/pull/123)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Only print the report (less log noise)",
@@ -154,6 +173,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.quiet:
         logger.remove()
+
+    if args.pr:
+        try:
+            report = review_pr_url(args.pr, local_repo=Path(args.repo) if args.repo else None)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"PR review failed: {exc}")
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(report)
+        if args.output:
+            Path(args.output).write_text(
+                f"## Blast-Radius PR Review\n\n```text\n{report}\n```\n", encoding="utf-8"
+            )
+        return 1 if _should_fail(report, args.fail_on) else 0
 
     repo = Path(args.repo)
     if not (repo / ".git").exists() and not (repo / ".git").is_file():

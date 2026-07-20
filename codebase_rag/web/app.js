@@ -99,14 +99,21 @@ function enterEmbeddedMode(payload) {
 
 /* ---------------- data flow ---------------- */
 
+const PR_URL = /github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/i;
+
 async function runReview() {
+  const target = el.repo.value.trim() || ".";
+  const isPr = PR_URL.test(target);
   const body = {
-    repo_path: el.repo.value.trim() || ".",
-    base: el.base.value.trim() || "HEAD~1",
-    head: el.head.value.trim() || "HEAD",
+    repo_path: target,
+    // A PR carries its own range; base/head only apply to a local path.
+    base: isPr ? undefined : el.base.value.trim() || "HEAD~1",
+    head: isPr ? undefined : el.head.value.trim() || "HEAD",
   };
   setLoading(true);
-  el.status.textContent = "Building graph and reviewing…";
+  el.status.textContent = isPr
+    ? "Fetching the PR, building the graph…"
+    : "Building graph and reviewing…";
   try {
     const res = await fetch("/api/review", {
       method: "POST", headers: { "Content-Type": "application/json" },
