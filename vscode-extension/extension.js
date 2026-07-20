@@ -15,6 +15,9 @@ const path = require("path");
 const fs = require("fs");
 const { renderHtml, loadingHtml, errorHtml } = require("./webview");
 const { callSummary, listModels } = require("./summary");
+const { FindingsProvider } = require("./findingsView");
+
+let findingsProvider = null;
 
 /** Files that mark a directory as "a project you'd review", not a container.
  *  `.git` is checked as a direct child on purpose: walking up finds the
@@ -39,6 +42,14 @@ function activate(context) {
     vscode.commands.registerCommand("prgraf.chooseModel", () => chooseModel()),
     vscode.commands.registerCommand("prgraf.writeMcpConfig", () => writeMcpConfig(context))
   );
+
+  // Activity-bar view: findings survive after the graph panel is closed, and
+  // give the extension a home you can find without the command palette.
+  findingsProvider = new FindingsProvider();
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider("prgraf.findings", findingsProvider)
+  );
+
   registerMcpServer(context);
 }
 
@@ -372,6 +383,7 @@ async function runReview(context, forcePick) {
             return;
           }
           panel.webview.html = renderHtml(webDir, payload);
+          if (findingsProvider) findingsProvider.update(payload, root);
           // Narration is additive: the graph is already usable without it.
           if (cfg.get("summary", true) && (payload.findings || []).length) {
             narrate(panel, payload, cfg.get("model", ""));

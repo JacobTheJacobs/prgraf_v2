@@ -20,7 +20,8 @@
       },
       {
         "command": "prgraf.reviewPick",
-        "title": "prgraf: Review blast radius in…"
+        "title": "prgraf: Review blast radius in…",
+        "icon": "$(folder-opened)"
       },
       {
         "command": "prgraf.reviewInChat",
@@ -41,11 +42,47 @@
         "label": "prgraf blast-radius graph"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prgraf",
+          "title": "prgraf",
+          "icon": "media/prgraf.svg"
+        }
+      ]
+    },
+    "views": {
+      "prgraf": [
+        {
+          "id": "prgraf.findings",
+          "name": "Blast radius",
+          "icon": "media/prgraf.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "prgraf.findings",
+        "contents": "See what a change might break.\n[Review blast radius](command:prgraf.review)\nOpens a graph of the changed symbols and everything they reach.\n[Review with the agent (MCP)](command:prgraf.reviewInChat)"
+      }
+    ],
     "menus": {
       "scm/title": [
         {
           "command": "prgraf.review",
           "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "prgraf.review",
+          "when": "view == prgraf.findings",
+          "group": "navigation"
+        },
+        {
+          "command": "prgraf.reviewPick",
+          "when": "view == prgraf.findings",
           "group": "navigation"
         }
       ]
