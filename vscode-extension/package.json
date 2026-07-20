@@ -32,6 +32,10 @@
         "title": "prgraf: Choose summary model"
       },
       {
+        "command": "prgraf.chooseAgent",
+        "title": "prgraf: Choose agent (Claude, Codex, Gemini, Grok, …)"
+      },
+      {
         "command": "prgraf.writeMcpConfig",
         "title": "prgraf: Write .mcp.json (Claude Code, Cursor, …)"
       }
@@ -63,7 +67,7 @@
     "viewsWelcome": [
       {
         "view": "prgraf.findings",
-        "contents": "See what a change might break.\n[Review blast radius](command:prgraf.review)\nOpens a graph of the changed symbols and everything they reach.\n[Review with the agent (MCP)](command:prgraf.reviewInChat)"
+        "contents": "See what a change might break.\n[Review blast radius](command:prgraf.review)\nChanged symbols sit at the centre; everything they reach rings outward, closest first.\n\nWant an agent to dig in? [pick one](command:prgraf.chooseAgent) — Claude Code, Codex, Gemini, Grok, opencode, or VS Code chat — then [hand it the findings](command:prgraf.reviewInChat)."
       }
     ],
     "menus": {
@@ -104,6 +108,21 @@
           "type": "boolean",
           "default": true,
           "description": "Explain the blast radius in prose using whatever chat model this editor exposes. The model receives only the computed graph facts — never your diff or file contents. The graph works without any model."
+        },
+        "prgraf.agent": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "vscode", "claude", "codex", "gemini", "grok", "opencode"],
+          "enumDescriptions": [
+            "First agent CLI found on PATH",
+            "VS Code's built-in chat (agent mode)",
+            "Claude Code",
+            "Codex",
+            "Gemini CLI",
+            "Grok CLI",
+            "opencode"
+          ],
+          "description": "Which agent gets the findings when you run 'Review with the agent'. All of them read .mcp.json, so each one gets prgraf's graph tools."
         },
         "prgraf.model": {
           "type": "string",

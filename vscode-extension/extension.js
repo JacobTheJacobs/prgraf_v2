@@ -16,6 +16,7 @@ const fs = require("fs");
 const { renderHtml, loadingHtml, errorHtml } = require("./webview");
 const { callSummary, listModels } = require("./summary");
 const { FindingsProvider } = require("./findingsView");
+const agents = require("./agents");
 
 let findingsProvider = null;
 
@@ -40,6 +41,7 @@ function activate(context) {
     vscode.commands.registerCommand("prgraf.reviewPick", () => runReview(context, true)),
     vscode.commands.registerCommand("prgraf.reviewInChat", () => reviewInChat(context)),
     vscode.commands.registerCommand("prgraf.chooseModel", () => chooseModel()),
+    vscode.commands.registerCommand("prgraf.chooseAgent", () => chooseAgent()),
     vscode.commands.registerCommand("prgraf.writeMcpConfig", () => writeMcpConfig(context))
   );
 
@@ -180,7 +182,7 @@ function currentRoot(context) {
   return kids.length === 1 ? kids[0] : null;
 }
 
-/** Hand the review to the agent, which uses the MCP tools. */
+/** Hand the review to whichever agent the user picked. */
 async function reviewInChat(context) {
   const root = await resolveProjectRoot(context, false);
   if (!root) return;
@@ -188,21 +190,85 @@ async function reviewInChat(context) {
   if (mcpDidChange) mcpDidChange.fire(); // re-resolve the server for this root
 
   const cfg = vscode.workspace.getConfiguration("prgraf");
-  const base = cfg.get("base", "HEAD~1");
-  const query =
-    `Review the blast radius of ${base}..HEAD in ${path.basename(root)} using the ` +
-    `prgraf MCP tools. Start with minimal_context; if the risk is not low, call ` +
-    `review_diff with detail "standard", then trace_symbol on each finding. ` +
-    `Report what could break and what to check first. Keep it under 5 tool calls.`;
-
-  try {
-    await vscode.commands.executeCommand("workbench.action.chat.open", {
-      query,
-      mode: "agent",
-    });
-  } catch (_) {
-    await vscode.commands.executeCommand("workbench.action.chat.open", query);
+  const agent = agents.resolve(cfg.get("agent", "auto"));
+  if (!agent) {
+    vscode.window.showWarningMessage(
+      "prgraf: no agent available. Install one (claude, codex, gemini, grok, opencode) " +
+      "or use VS Code chat."
+    );
+    return;
   }
+
+  const base = cfg.get("base", "HEAD~1");
+  const prompt =
+    `Review the blast radius of ${base}..HEAD in this repo using the prgraf MCP ` +
+    `tools. Start with minimal_context; if the risk is not low, call review_diff ` +
+    `with detail "standard", then trace_symbol on each finding. Report what could ` +
+    `break and what to check first. Keep it under 5 tool calls.`;
+
+  if (agent.id === "vscode") {
+    try {
+      await vscode.commands.executeCommand("workbench.action.chat.open", {
+        query: prompt, mode: "agent",
+      });
+    } catch (_) {
+      await vscode.commands.executeCommand("workbench.action.chat.open", prompt);
+    }
+    return;
+  }
+
+  // CLI agents read project MCP config, so make sure prgraf's tools are there.
+  await ensureMcpConfig(root);
+  const terminal = vscode.window.createTerminal({ name: `prgraf · ${agent.label}`, cwd: root });
+  terminal.show();
+  terminal.sendText(agent.build(prompt).join(" "));
+}
+
+/** Choose which agent handles the handoff — only offers what is installed. */
+async function chooseAgent() {
+  const found = agents.available();
+  const items = found.map((a) => ({
+    label: a.label,
+    description: a.bin ? a.bin : "built in",
+    value: a.id,
+  }));
+  items.unshift({ label: "Auto", description: "first CLI found", value: "auto" });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Which agent should review the findings?",
+  });
+  if (!pick) return;
+  await vscode.workspace
+    .getConfiguration("prgraf")
+    .update("agent", pick.value, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`prgraf agent: ${pick.label}`);
+}
+
+/** Write .mcp.json if absent so CLI agents can see the graph tools. */
+async function ensureMcpConfig(root) {
+  const target = path.join(root, ".mcp.json");
+  let existing = {};
+  if (fs.existsSync(target)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch (_) {
+      return; // malformed and not ours to fix silently
+    }
+    if (existing.mcpServers && existing.mcpServers.prgraf) return;
+  }
+  const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
+  const merged = {
+    ...existing,
+    mcpServers: {
+      ...(existing.mcpServers || {}),
+      prgraf: {
+        command: python,
+        args: ["-m", "codebase_rag.graph.mcp_server"],
+        env: { PRGRAF_REPO: root },
+      },
+    },
+  };
+  fs.writeFileSync(target, JSON.stringify(merged, null, 2) + "\n", "utf8");
 }
 
 function isProject(dir) {
