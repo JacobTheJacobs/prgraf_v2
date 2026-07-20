@@ -99,8 +99,17 @@ def cache_root() -> Path:
 
 
 def _origin_matches(repo_path: Path, pr: PRRef) -> bool:
+    """Is this checkout a clone of the PR's project?
+
+    Normalises separators before comparing: an origin can be an SSH URL, an
+    HTTPS URL, or a filesystem path, and on Windows that path uses
+    backslashes — which a naive substring check never matches.
+    """
     url = _git(["remote", "get-url", "origin"], repo_path).stdout.strip().lower()
-    return f"{pr.owner}/{pr.repo}".lower() in url.replace(".git", "")
+    if not url:
+        return False
+    normalized = url.replace("\\", "/").replace(":", "/").removesuffix(".git")
+    return f"{pr.owner}/{pr.repo}".lower() in normalized
 
 
 def _is_dirty(repo_path: Path) -> bool:
