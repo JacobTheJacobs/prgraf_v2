@@ -70,9 +70,11 @@ IMPACT_SCORE_FLOOR = _bounded_float_env(
 
 SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
-    "node_modules", "dist", "build", "target", "vendor", ".next",
+    # Build output. Indexing it doubles every symbol in the graph: a compiled
+    # copy competes with its own source for call resolution and inflates reach.
+    "node_modules", "dist", "build", "out", "target", "vendor", ".next",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".prgraf",
-    "temp_repos", "site-packages",
+    "temp_repos", "site-packages", "coverage",
 })
 
 MAX_FILE_BYTES = _int_env("PRGRAF_MAX_FILE_BYTES", 1_500_000)
