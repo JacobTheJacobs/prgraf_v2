@@ -97,17 +97,35 @@ def _should_fail(report: str, fail_on: str) -> bool:
     return False
 
 
-def review_pr_url(url: str, local_repo: Path | None = None) -> str:
+def review_pr_url(
+    url: str,
+    local_repo: Path | None = None,
+    base_override: str | None = None,
+) -> str:
     """Review a GitHub PR by URL: fetch it, then review it like any range."""
-    from codebase_rag.graph.pr import parse_pr_url, prepare_pr
+    from codebase_rag.graph.pr import current_ref, parse_pr_url, prepare_pr
 
     pr = parse_pr_url(url)
     if pr is None:
         raise ValueError(f"not a GitHub PR URL: {url!r}")
-    repo, base, head = prepare_pr(pr, local_repo=local_repo)
-    db = default_db_path(repo)
-    build_graph(repo, db_path=db)
-    report = format_report(review_range(repo, base=base, head=head, db_path=db))
+
+    # Capture where the user's checkout was BEFORE anything moves it, so the
+    # review can put it back. Read after prepare_pr and we would only see the
+    # detached PR head.
+    local = Path(local_repo).expanduser().resolve() if local_repo else None
+    was_at = current_ref(local) if local and (local / ".git").exists() else None
+
+    repo, base, head = prepare_pr(pr, local_repo=local_repo, base_override=base_override)
+    # Only restore if we actually moved the user's tree, not a cached clone.
+    restore_to = was_at if (local and repo == local) else None
+    try:
+        db = default_db_path(repo)
+        build_graph(repo, db_path=db)
+        report = format_report(review_range(repo, base=base, head=head, db_path=db))
+    finally:
+        if restore_to:
+            _git(["checkout", "--quiet", restore_to], repo)
+            logger.info(f"Restored {repo.name} to {restore_to}")
     return f"{pr.slug}\n{report}"
 
 
@@ -176,7 +194,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pr:
         try:
-            report = review_pr_url(args.pr, local_repo=Path(args.repo) if args.repo else None)
+            report = review_pr_url(
+                args.pr,
+                local_repo=Path(args.repo) if args.repo else None,
+                base_override=args.base,  # for a stacked PR based on another branch
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"PR review failed: {exc}")
             print(f"error: {exc}", file=sys.stderr)

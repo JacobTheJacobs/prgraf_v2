@@ -66,6 +66,16 @@ def looks_like_pr_url(value: str) -> bool:
 
 
 def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    import os
+
+    # Never let git block on a credential prompt: a private repo would
+    # otherwise hang until the timeout instead of saying it needs access.
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "",
+        "GCM_INTERACTIVE": "never",
+    }
     return subprocess.run(  # noqa: S603 - list args, no shell
         ["git", *args],
         cwd=str(cwd) if cwd else None,
@@ -74,6 +84,7 @@ def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
         encoding="utf-8",
         errors="replace",
         stdin=subprocess.DEVNULL,
+        env=env,
         timeout=GIT_TIMEOUT,
         check=False,
     )
@@ -92,23 +103,45 @@ def _origin_matches(repo_path: Path, pr: PRRef) -> bool:
     return f"{pr.owner}/{pr.repo}".lower() in url.replace(".git", "")
 
 
+def _is_dirty(repo_path: Path) -> bool:
+    return bool(_git(["status", "--porcelain"], repo_path).stdout.strip())
+
+
+def current_ref(repo_path: Path) -> str:
+    """Branch name, or a commit sha when detached — enough to restore later."""
+    branch = _git(["symbolic-ref", "--quiet", "--short", "HEAD"], repo_path).stdout.strip()
+    return branch or _git(["rev-parse", "HEAD"], repo_path).stdout.strip()
+
+
 def prepare_pr(
     pr: PRRef,
     local_repo: Path | None = None,
+    base_override: str | None = None,
 ) -> tuple[Path, str, str]:
     """Fetch a PR and return (repo_path, base, head).
 
-    Uses `local_repo` when it is a clone of the same project, otherwise a
-    cached clone. `base` is the merge-base so the review reflects only what
-    the PR changed, not everything that landed on the default branch since.
+    Uses `local_repo` only when it is a clone of the same project AND has no
+    uncommitted changes — reviewing checks the tree out at the PR head, and
+    silently discarding someone's work in progress is never acceptable. A
+    cached clone is used otherwise.
+
+    `base` is the merge-base with the default branch, so the review reflects
+    only what the PR changed. Pass `base_override` for a stacked PR whose real
+    base is another branch rather than the default one.
     """
     repo_path: Path | None = None
 
     if local_repo:
         candidate = Path(local_repo).expanduser().resolve()
         if (candidate / ".git").exists() and _origin_matches(candidate, pr):
-            repo_path = candidate
-            logger.info(f"Using local clone for {pr.slug}: {repo_path}")
+            if _is_dirty(candidate):
+                logger.warning(
+                    f"{candidate} has uncommitted changes; using a cached clone "
+                    "instead of checking it out."
+                )
+            else:
+                repo_path = candidate
+                logger.info(f"Using local clone for {pr.slug}: {repo_path}")
 
     if repo_path is None:
         target = cache_root() / f"{pr.owner}__{pr.repo}"
@@ -137,9 +170,12 @@ def prepare_pr(
             f"could not fetch {pr.slug}: {fetched.stderr.strip() or 'is it private, or does it exist?'}"
         )
 
-    default = _default_branch(repo_path)
-    merge_base = _git(["merge-base", default, head_ref], repo_path).stdout.strip()
-    base = merge_base or default
+    # A stacked PR's real base is another branch, which only the GitHub API
+    # knows; assuming the default branch would fold the parent PR's changes
+    # into this review. base_override exists for that case.
+    reference = base_override or _default_branch(repo_path)
+    merge_base = _git(["merge-base", reference, head_ref], repo_path).stdout.strip()
+    base = merge_base or reference
 
     # Parsing needs the PR's file contents on disk, not just its refs.
     # Detached so the ref never becomes the checked-out branch.
