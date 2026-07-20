@@ -12,6 +12,7 @@ from pathlib import Path
 from loguru import logger
 
 from codebase_rag.graph.build import build_graph
+from codebase_rag.graph.diff import WORKTREE
 from codebase_rag.graph.review import format_report, review_range
 from codebase_rag.graph.store import default_db_path
 
@@ -183,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Review a GitHub PR by URL (https://github.com/owner/repo/pull/123)",
     )
     parser.add_argument(
+        "--uncommitted",
+        action="store_true",
+        help="Review working-tree changes against base (use before committing)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Only print the report (less log noise)",
@@ -218,7 +224,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     try:
-        report = build_report(repo=repo, base=args.base, head=args.head)
+        head = WORKTREE if args.uncommitted else args.head
+        # Uncommitted review compares against HEAD by default: "what am I about
+        # to commit", not "what changed since main".
+        base = args.base or ("HEAD" if args.uncommitted else None)
+        report = build_report(repo=repo, base=base, head=head)
     except Exception as exc:
         logger.error(f"Review failed: {exc}")
         print(f"error: {exc}", file=sys.stderr)
