@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from codebase_rag.graph.build import build_graph
-from codebase_rag.graph.pr import parse_pr_url, prepare_pr
+from codebase_rag.graph.pr import current_ref, parse_pr_url, prepare_pr, restore_checkout
 from codebase_rag.graph.review import review_range, web_payload
 from codebase_rag.graph.store import GraphStore, default_db_path
 
@@ -83,8 +83,22 @@ async def review(request: Request):
         # One field accepts either a local path or a GitHub PR URL; a PR just
         # resolves to a range, so the rest of the pipeline is unchanged.
         pr = parse_pr_url(raw) or parse_pr_url(data.get("pr_url") or "")
+        restore_to = None
+        restore_repo = None
         if pr:
-            repo, base, head = prepare_pr(pr, local_repo=data.get("local_repo"))
+            # Reviewing a PR checks the tree out at the PR head. When that tree
+            # is the user's own clone we must put it back, exactly as the CLI
+            # does — leaving it detached silently orphans any commit they make
+            # next. Capture the ref BEFORE anything moves.
+            local_raw = data.get("local_repo")
+            if local_raw:
+                local = Path(local_raw).expanduser().resolve()
+                if (local / ".git").exists():
+                    restore_to = current_ref(local)
+                    restore_repo = local
+            repo, base, head = prepare_pr(pr, local_repo=local_raw)
+            if restore_repo != repo:
+                restore_to = None  # a cached clone, not the user's checkout
             pr_slug = pr.slug
         else:
             repo = _resolve_repo(raw)
@@ -96,7 +110,11 @@ async def review(request: Request):
         build_graph(repo, db_path=db)
 
         render_cap = int(data.get("render_cap") or 160)
-        result = review_range(repo, base=base, head=head, db_path=db)
+        try:
+            result = review_range(repo, base=base, head=head, db_path=db)
+        finally:
+            if restore_to and restore_repo:
+                restore_checkout(restore_repo, restore_to)
         payload = web_payload(result, cap=render_cap)
         payload["repo"] = str(repo)
         payload["base"] = base

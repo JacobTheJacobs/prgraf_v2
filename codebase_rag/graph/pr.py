@@ -116,6 +116,15 @@ def _is_dirty(repo_path: Path) -> bool:
     return bool(_git(["status", "--porcelain"], repo_path).stdout.strip())
 
 
+def restore_checkout(repo_path: Path, ref: str) -> None:
+    """Put a checkout back on the ref it was on before a review moved it."""
+    result = _git(["checkout", "--quiet", ref], repo_path)
+    if result.returncode == 0:
+        logger.info(f"Restored {Path(repo_path).name} to {ref}")
+    else:
+        logger.warning(f"Could not restore {repo_path} to {ref}: {result.stderr.strip()}")
+
+
 def current_ref(repo_path: Path) -> str:
     """Branch name, or a commit sha when detached — enough to restore later."""
     branch = _git(["symbolic-ref", "--quiet", "--short", "HEAD"], repo_path).stdout.strip()
