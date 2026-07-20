@@ -26,8 +26,15 @@ def _env(*names: str, default: str | None = None) -> str | None:
 
 def _resolve_base(repo: Path, base: str | None) -> str:
     if base:
-        # Actions often pass the bare branch name (e.g. "main").
-        if not base.startswith(("origin/", "refs/")) and _ref_exists(repo, f"origin/{base}"):
+        if base.startswith(("origin/", "refs/")):
+            return base
+        # Take the ref as written when it already resolves. Prefixing blindly
+        # turned "HEAD~1" into "origin/HEAD~1" — which also resolves, silently
+        # reviewing a completely different range.
+        if _ref_exists(repo, base):
+            return base
+        # Only now assume it is a bare branch name, as Actions passes ("main").
+        if _ref_exists(repo, f"origin/{base}"):
             return f"origin/{base}"
         return base
 

@@ -141,6 +141,29 @@ def test_diff_seeds_at_symbol_level():
     assert "auth/session.py::hash_pw" not in names
 
 
+def test_diff_seeds_innermost_symbol_not_enclosing_class():
+    """A change inside a method must not also seed its class.
+
+    The class spans every method, so its reach is far larger; seeding both
+    lets the class outrank the method that actually changed.
+    """
+    root = _make_repo()
+    (root / "app" / "svc.py").write_text(
+        "class Service:\n"
+        "    def alpha(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def beta(self):\n"
+        "        return 2\n",
+        encoding="utf-8",
+    )
+    store = _store(root)
+    seeds = map_ranges_to_nodes(store, {"app/svc.py": [(3, 3)]})  # inside alpha
+    names = {s.name for s in seeds}
+    assert names == {"alpha"}, names
+    assert "Service" not in names
+
+
 def test_diff_falls_back_to_file_for_module_level_edit():
     root = _make_repo()
     store = _store(root)

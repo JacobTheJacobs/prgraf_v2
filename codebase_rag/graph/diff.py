@@ -112,16 +112,23 @@ def map_ranges_to_nodes(
             continue
 
         matched_any = False
-        for node in nodes:
-            if node.kind == "File":
+        candidates = [n for n in nodes if n.kind != "File"]
+        for start, end in spans:
+            covering = [
+                n for n in candidates
+                if n.line_start <= end and n.line_end >= start
+            ]
+            if not covering:
                 continue
-            for start, end in spans:
-                if node.line_start <= end and node.line_end >= start:
-                    if node.qualified_name not in seen:
-                        seen.add(node.qualified_name)
-                        seeds.append(node)
-                    matched_any = True
-                    break
+            matched_any = True
+            # Seed the innermost symbol only. A change inside a method also
+            # falls within its class, and the class spans every method, so
+            # seeding both lets the class's much larger reach bury the method
+            # that actually changed.
+            innermost = min(covering, key=lambda n: n.line_end - n.line_start)
+            if innermost.qualified_name not in seen:
+                seen.add(innermost.qualified_name)
+                seeds.append(innermost)
 
         if not matched_any:
             # Edits landed outside any symbol — module-level statements,
