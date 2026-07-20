@@ -201,7 +201,7 @@ def render_graph(result: ReviewResult, cap: int = 160) -> dict:
         (n for n in nodes if n["qualified_name"] not in seeds),
         key=lambda n: -scores.get(n["qualified_name"], 0.0),
     )
-    keep = seeds | {n["qualified_name"] for n in ranked[: max(0, cap)]}
+    keep = seeds | {n["qualified_name"] for n in ranked[: max(0, cap * 10)]}
     kept_nodes = [n for n in nodes if n["qualified_name"] in keep]
     kept_edges = [
         e for e in sub.get("edges", [])
