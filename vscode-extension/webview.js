@@ -35,6 +35,8 @@ function renderHtml(webDir, payload) {
   window.__PRGRAF_DATA__ = ${data};
   const vscode = acquireVsCodeApi();
   window.__prgrafOpen = (file, line) => vscode.postMessage({ type: "open", file, line });
+  window.__prgrafPost = (type, payload) => vscode.postMessage(Object.assign({ type }, payload || {}));
+  window.__prgrafHosted = true;
 </script>
 <script nonce="${n}">${js}</script>
 </body></html>`;

@@ -58,26 +58,63 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+/** Buttons that let the reader ask for an explanation, so the feature is
+ *  visible even when no model answered — silence taught nobody it exists. */
+function summaryActions(label) {
+  if (!window.__prgrafHosted) return "";
+  return `<div class="sum-actions">
+      <button class="sum-btn" data-act="explain">${label}</button>
+      <button class="sum-btn ghost" data-act="agent">Ask an agent</button>
+    </div>`;
+}
+
+function wireSummaryActions(box) {
+  box.querySelectorAll(".sum-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const act = btn.dataset.act;
+      if (act === "explain") renderSummary(null, null, true);
+      window.__prgrafPost(act === "agent" ? "askAgent" : "explain");
+    });
+  });
+}
+
 function renderSummary(text, error, pending) {
   const box = $("summary");
   if (!box) return;
+  box.classList.remove("hidden");
+
   if (pending) {
     box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span>
       <span class="sum-wait">reading the graph…</span></div>`;
-    box.classList.remove("hidden");
     return;
   }
   if (error) {
     box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>
-      <p class="sum-error">${escapeHtml(error)}</p>`;
-    box.classList.remove("hidden");
+      <p class="sum-error">${escapeHtml(error)}</p>${summaryActions("Retry")}`;
+    wireSummaryActions(box);
     return;
   }
-  if (!text) { box.classList.add("hidden"); return; }
+  if (!text) {
+    // Idle: no explanation yet. Offer one instead of hiding the card, which
+    // is why this looked like a missing feature rather than an unused one.
+    box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span>
+      <span class="sum-wait">graph findings are ready</span></div>
+      ${summaryActions("Explain impact")}`;
+    wireSummaryActions(box);
+    return;
+  }
   const paras = String(text).split(/\n\s*\n/).filter(Boolean)
     .map((p) => `<p>${escapeHtml(p)}</p>`).join("");
-  box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>${paras}`;
-  box.classList.remove("hidden");
+  box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>${paras}
+    ${summaryActions("Re-explain")}`;
+  wireSummaryActions(box);
+}
+
+function showIdleSummary(payload) {
+  // Only inside the editor: the browser app has no agent to hand off to.
+  if (!window.__prgrafHosted) return;
+  if (!(payload.findings || []).length) return;
+  renderSummary(null, null, false);
 }
 
 function enterEmbeddedMode(payload) {
@@ -95,6 +132,7 @@ function enterEmbeddedMode(payload) {
   const exportBtn = $("export-btn");
   if (exportBtn) exportBtn.remove();
   render(payload);
+  showIdleSummary(payload);
 }
 
 /* ---------------- data flow ---------------- */

@@ -406,6 +406,44 @@ button.primary.loading .btn-label {
     line-height: 1.5;
 }
 
+.sum-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.sum-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s, background 0.15s;
+}
+
+.sum-btn:hover {
+    filter: brightness(1.1);
+}
+
+.sum-btn:disabled {
+    cursor: wait;
+    filter: saturate(0.4);
+}
+
+.sum-btn.ghost {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+}
+
+.sum-btn.ghost:hover {
+    background: var(--bg-elev);
+    color: var(--text);
+}
+
 /* ---- findings ---- */
 
 .findings {

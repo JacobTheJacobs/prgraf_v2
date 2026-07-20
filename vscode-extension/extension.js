@@ -390,6 +390,10 @@ async function runReview(context, forcePick) {
   const base = cfg.get("base", "HEAD~1");
   const head = cfg.get("head", "HEAD");
 
+  // Kept so the panel's Explain button can re-run narration without redoing
+  // the whole graph build.
+  let lastPayload = null;
+
   const panel = vscode.window.createWebviewPanel(
     "prgraf.graph",
     `prgraf · ${path.basename(root)}`,
@@ -448,6 +452,7 @@ async function runReview(context, forcePick) {
             resolve();
             return;
           }
+          lastPayload = payload;
           panel.webview.html = renderHtml(webDir, payload);
           if (findingsProvider) findingsProvider.update(payload, root);
           // Narration is additive: the graph is already usable without it.
@@ -468,9 +473,19 @@ async function runReview(context, forcePick) {
       })
   );
 
-  // Let the graph open the clicked symbol's file in the editor.
   panel.webview.onDidReceiveMessage((msg) => {
-    if (msg && msg.type === "open" && msg.file) {
+    if (!msg) return;
+    // Explain / hand-off requested from the panel itself, so the LLM review is
+    // reachable where the findings are rather than only from the palette.
+    if (msg.type === "explain") {
+      if (lastPayload) narrate(panel, lastPayload, cfg.get("model", ""));
+      return;
+    }
+    if (msg.type === "askAgent") {
+      vscode.commands.executeCommand("prgraf.reviewInChat");
+      return;
+    }
+    if (msg.type === "open" && msg.file) {
       const uri = vscode.Uri.file(path.join(root, msg.file));
       const line = Math.max(0, (msg.line || 1) - 1);
       vscode.window
