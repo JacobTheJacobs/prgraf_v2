@@ -272,6 +272,7 @@ function renderNothingToReview(payload) {
        ${window.__prgrafHosted
          ? `<div class="sum-actions">
               <button class="sum-btn" data-widen="1">Compare against the main branch</button>
+              <button class="sum-btn ghost" data-agent="1">Ask an agent</button>
             </div>`
          : ""}
      </div>`;
@@ -284,6 +285,10 @@ function renderNothingToReview(payload) {
       window.__prgrafPost("widen");
     });
   }
+  // The agent path must stay reachable even with nothing to report: an empty
+  // graph result is exactly when you may want a second opinion on the branch.
+  const agent = el.findings.querySelector("[data-agent]");
+  if (agent) agent.addEventListener("click", () => window.__prgrafPost("askAgent"));
 }
 
 function renderLegend() {
