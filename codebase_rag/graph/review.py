@@ -12,12 +12,63 @@ from typing import Any
 
 from loguru import logger
 
+from datetime import datetime
+
 from .constants import MAX_IMPACT_DEPTH, MAX_IMPACT_NODES
-from .diff import changed_symbols
+from .diff import WORKTREE, _git, changed_symbols
 from .risk import ChangedSymbolRisk, overall_risk, score_symbol
 from .store import GraphStore, default_db_path
 
 MAX_FINDINGS = 3
+
+
+class EmptyGraphError(RuntimeError):
+    """The graph exists but holds no symbols.
+
+    Raised rather than returned, because the failure mode it prevents is the
+    worst one this tool has: an empty graph produces zero changed symbols,
+    which renders as "nothing to review" — a clean bill of health that is
+    indistinguishable from a real one. Silence must not read as a pass.
+    """
+
+
+def graph_staleness(store: GraphStore, repo_root: Path, head: str) -> dict | None:
+    """Was the graph built before the code it is about to review?
+
+    Returns None when fresh. A stale graph still produces confident output;
+    it just maps diff line numbers onto symbol ranges that have since moved,
+    so findings can land on the wrong symbol entirely.
+    """
+    built_raw = store.get_meta("last_build")
+    if not built_raw:
+        return None
+    try:
+        built = datetime.fromisoformat(built_raw)
+    except ValueError:
+        return None
+
+    if head == WORKTREE:
+        # Uncommitted review: the working tree itself is the head.
+        newest = _git(["diff", "--name-only"], repo_root).split("\n")
+        mtimes = [
+            datetime.fromtimestamp((repo_root / f).stat().st_mtime)
+            for f in (n.strip() for n in newest)
+            if f and (repo_root / f).exists()
+        ]
+        if not mtimes or max(mtimes) <= built:
+            return None
+        return {"graph_built": built_raw, "code_changed": max(mtimes).isoformat(timespec="seconds")}
+
+    stamp = _git(["log", "-1", "--format=%cI", head], repo_root).strip()
+    if not stamp:
+        return None
+    try:
+        committed = datetime.fromisoformat(stamp).replace(tzinfo=None)
+    except ValueError:
+        return None
+    if committed <= built:
+        return None
+    return {"graph_built": built_raw, "code_changed": committed.isoformat(timespec="seconds")}
 
 
 @dataclass
@@ -28,6 +79,7 @@ class ReviewResult:
     changed_files: list[str] = field(default_factory=list)
     subgraph: dict = field(default_factory=dict)
     truncated: bool = False
+    stale: dict | None = None
 
     def to_dict(self, detail: str = "minimal") -> dict[str, Any]:
         """Serialize at a given detail level.
@@ -50,6 +102,15 @@ class ReviewResult:
                 for f in self.findings
             ],
         }
+        # Surfaced at every level including minimal: an agent that stops after
+        # the cheap call is exactly the one that must not be told stale
+        # findings without knowing they are stale.
+        if self.stale:
+            base["warning"] = (
+                f"Graph built {self.stale['graph_built']} but code changed "
+                f"{self.stale['code_changed']}. Findings may point at symbols "
+                f"that have since moved. Call `rebuild` and review again."
+            )
         if detail == "minimal":
             return base
 
@@ -136,10 +197,21 @@ def review_range(
     store = GraphStore(db_path or default_db_path(repo_root))
 
     try:
+        if store.node_count() == 0:
+            raise EmptyGraphError(
+                f"The graph at {store.db_path} holds no symbols, so this review "
+                f"would find nothing regardless of what changed. Check that the "
+                f"repo root is right (currently {repo_root}) and run `rebuild`."
+            )
+
+        stale = graph_staleness(store, repo_root, head)
+        if stale:
+            logger.warning("Graph is older than the reviewed code: {}", stale)
+
         seeds, ranges = changed_symbols(store, repo_root, base, head)
         if not seeds:
             logger.info("No changed symbols found in the graph for this range.")
-            return ReviewResult(changed_files=sorted(ranges))
+            return ReviewResult(changed_files=sorted(ranges), stale=stale)
 
         risks: list[ChangedSymbolRisk] = []
         union_scores: dict[str, float] = {}
@@ -180,6 +252,7 @@ def review_range(
             changed_files=sorted(ranges),
             subgraph=subgraph,
             truncated=truncated,
+            stale=stale,
         )
     finally:
         store.close()
@@ -244,22 +317,34 @@ def web_payload(result: ReviewResult, cap: int = 160) -> dict:
         "changed_files": result.changed_files,
         "graph": render_graph(result, cap),
         "truncated": result.truncated,
+        "stale": result.stale,
     }
+
+
+def _stale_line(result: ReviewResult) -> list[str]:
+    if not result.stale:
+        return []
+    return [
+        f"! Graph built {result.stale['graph_built']}, code changed "
+        f"{result.stale['code_changed']} — rebuild before trusting line numbers."
+    ]
 
 
 def format_report(result: ReviewResult) -> str:
     """Terse text report — the PR-comment surface."""
     if not result.all_risks:
         files = len(result.changed_files)
-        return (
-            "Pre-Landing Review: no reviewable symbols changed.\n"
-            f"Checked {files} changed file(s); nothing mapped to a graph symbol."
-        )
+        return "\n".join([
+            "Pre-Landing Review: no reviewable symbols changed.",
+            f"Checked {files} changed file(s); nothing mapped to a graph symbol.",
+            *_stale_line(result),
+        ])
 
     overall = result.overall
     lines = [
         f"Pre-Landing Review: {len(result.findings)} finding(s) · "
-        f"overall risk {overall['score']:.2f} ({overall['level']})"
+        f"overall risk {overall['score']:.2f} ({overall['level']})",
+        *_stale_line(result),
     ]
 
     for finding in result.findings:

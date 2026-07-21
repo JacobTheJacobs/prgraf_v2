@@ -304,9 +304,13 @@ class GraphStore:
         return [_row_to_node(r) for r in rows]
 
     def callers_of(self, qualified_name: str, limit: int = 50) -> list[GraphNode]:
+        # GROUP BY, not raw rows: one edge per call *site*, so a function called
+        # five times from one place would otherwise read as five dependents and
+        # inflate the "many callers" risk term. Dependents are what matter here.
         rows = self._conn.execute(
             "SELECT n.* FROM edges e JOIN nodes n ON n.qualified_name = e.source_qualified "
-            "WHERE e.target_qualified = ? AND e.kind = 'CALLS' LIMIT ?",
+            "WHERE e.target_qualified = ? AND e.kind = 'CALLS' "
+            "GROUP BY n.qualified_name LIMIT ?",
             (qualified_name, limit),
         ).fetchall()
         return [_row_to_node(r) for r in rows]
@@ -314,7 +318,8 @@ class GraphStore:
     def callees_of(self, qualified_name: str, limit: int = 50) -> list[GraphNode]:
         rows = self._conn.execute(
             "SELECT n.* FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified "
-            "WHERE e.source_qualified = ? AND e.kind = 'CALLS' LIMIT ?",
+            "WHERE e.source_qualified = ? AND e.kind = 'CALLS' "
+            "GROUP BY n.qualified_name LIMIT ?",
             (qualified_name, limit),
         ).fetchall()
         return [_row_to_node(r) for r in rows]
@@ -324,10 +329,15 @@ class GraphStore:
 
         TESTED_BY is stored source=production, target=test, so the test side
         is the target. Getting this backwards silently reports zero coverage.
+
+        Deduped like callers_of, and here the direction is dangerous: one test
+        asserting five times would otherwise count as five tests and drive the
+        untested penalty to its floor.
         """
         rows = self._conn.execute(
             "SELECT n.* FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified "
-            "WHERE e.source_qualified = ? AND e.kind = 'TESTED_BY' LIMIT ?",
+            "WHERE e.source_qualified = ? AND e.kind = 'TESTED_BY' "
+            "GROUP BY n.qualified_name LIMIT ?",
             (qualified_name, limit),
         ).fetchall()
         return [_row_to_node(r) for r in rows]
@@ -349,6 +359,10 @@ class GraphStore:
             "JOIN _edge_scope s2 ON s2.qn = e.target_qualified"
         ).fetchall()
         return [_row_to_edge(r) for r in rows]
+
+    def node_count(self) -> int:
+        """Cheap emptiness probe — full stats() runs five aggregate queries."""
+        return self._conn.execute("SELECT COUNT(*) c FROM nodes").fetchone()["c"]
 
     def stats(self) -> dict[str, Any]:
         conn = self._conn

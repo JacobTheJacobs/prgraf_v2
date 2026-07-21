@@ -18,7 +18,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from .build import build_graph
-from .review import review_range
+from .review import EmptyGraphError, graph_staleness, review_range
 from .store import GraphStore, default_db_path
 
 DetailLevel = Literal["minimal", "standard", "verbose"]
@@ -35,12 +35,36 @@ TOKEN_DISCIPLINE = """\
 
 
 def _repo_root() -> Path:
-    return Path(os.environ.get("PRGRAF_REPO", ".")).resolve()
+    """Where to review.
+
+    PRGRAF_REPO wins. Without it the server used to take the client's cwd,
+    which for an editor or a globally-registered agent is arbitrary — one real
+    session resolved to a drive root and every review came back empty. So walk
+    up looking for a graph someone actually built, and only fall back to cwd.
+    """
+    explicit = os.environ.get("PRGRAF_REPO")
+    if explicit:
+        return Path(explicit).resolve()
+
+    cwd = Path(".").resolve()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".prgraf" / "graph.db").exists():
+            return candidate
+    return cwd
 
 
 def _db(repo: Path) -> Path:
     override = os.environ.get("PRGRAF_DB")
     return Path(override) if override else default_db_path(repo)
+
+
+def _no_graph(repo: Path, exc: Exception) -> dict[str, Any]:
+    """Uniform, loud failure. Never a shape that reads like a clean review."""
+    return {
+        "error": str(exc),
+        "repo": str(repo),
+        "next": "call `rebuild`, or set PRGRAF_REPO to the project you meant",
+    }
 
 
 def _open_store(repo: Path) -> GraphStore:
@@ -49,7 +73,14 @@ def _open_store(repo: Path) -> GraphStore:
         raise FileNotFoundError(
             f"No graph at {db}. Run `prgraf build` or call the `rebuild` tool first."
         )
-    return GraphStore(db)
+    store = GraphStore(db)
+    if store.node_count() == 0:
+        store.close()
+        raise EmptyGraphError(
+            f"The graph at {db} holds no symbols. Check the repo root "
+            f"({repo}) and run `rebuild`."
+        )
+    return store
 
 
 def _node_brief(node: Any, score: float | None = None) -> dict[str, Any]:
@@ -76,8 +107,8 @@ def minimal_context(task: str = "review changes", base: str = "HEAD~1") -> dict[
     repo = _repo_root()
     try:
         result = review_range(repo, base=base, db_path=_db(repo))
-    except FileNotFoundError as exc:
-        return {"error": str(exc), "next": "call `rebuild` then retry"}
+    except (FileNotFoundError, EmptyGraphError) as exc:
+        return _no_graph(repo, exc)
     packet = result.to_dict(detail="minimal")
     packet["task"] = task
     packet["next_tool_suggestions"] = (
@@ -99,8 +130,8 @@ def review_diff(base: str = "HEAD~1", head: str = "HEAD", detail: DetailLevel = 
     repo = _repo_root()
     try:
         result = review_range(repo, base=base, head=head, db_path=_db(repo))
-    except FileNotFoundError as exc:
-        return {"error": str(exc), "next": "call `rebuild` then retry"}
+    except (FileNotFoundError, EmptyGraphError) as exc:
+        return _no_graph(repo, exc)
     return result.to_dict(detail=detail)
 
 
@@ -112,7 +143,11 @@ def trace_symbol(name: str, detail: DetailLevel = "minimal") -> dict[str, Any]:
     you care about. Accepts a bare name or a fully-qualified name.
     """
     repo = _repo_root()
-    with _open_store(repo) as store:
+    try:
+        store = _open_store(repo)
+    except (FileNotFoundError, EmptyGraphError) as exc:
+        return _no_graph(repo, exc)
+    with store:
         matches = store.find_nodes(name, limit=5)
         if not matches:
             return {"error": f"no symbol matching {name!r}", "matches": []}
@@ -146,7 +181,11 @@ def blast_radius(name: str, max_depth: int = 2, detail: DetailLevel = "minimal")
     only need direct callers/tests.
     """
     repo = _repo_root()
-    with _open_store(repo) as store:
+    try:
+        store = _open_store(repo)
+    except (FileNotFoundError, EmptyGraphError) as exc:
+        return _no_graph(repo, exc)
+    with store:
         matches = store.find_nodes(name, limit=3)
         if not matches:
             return {"error": f"no symbol matching {name!r}"}
@@ -179,7 +218,11 @@ def find_symbols(query: str, limit: int = 15) -> dict[str, Any]:
     `blast_radius` on whichever match is relevant.
     """
     repo = _repo_root()
-    with _open_store(repo) as store:
+    try:
+        store = _open_store(repo)
+    except (FileNotFoundError, EmptyGraphError) as exc:
+        return _no_graph(repo, exc)
+    with store:
         matches = store.find_nodes(query, limit=limit)
         return {
             "query": query,
@@ -190,14 +233,27 @@ def find_symbols(query: str, limit: int = 15) -> dict[str, Any]:
 
 @mcp.tool()
 def graph_status() -> dict[str, Any]:
-    """Graph size, languages, and freshness. Use to confirm it's built."""
+    """Graph size, languages, and freshness. Use to confirm it's built.
+
+    Always reports which repo it resolved — a graph that looks fine but
+    describes the wrong project is the failure this tool exists to catch.
+    """
     repo = _repo_root()
     db = _db(repo)
     if not db.exists():
-        return {"built": False, "next": "call `rebuild`"}
+        return {"built": False, "repo": str(repo), "next": "call `rebuild`"}
     with GraphStore(db) as store:
         stats = store.stats()
-        stats["built"] = True
+        stats["repo"] = str(repo)
+        stats["built"] = stats["total_nodes"] > 0
+        if not stats["built"]:
+            stats["error"] = f"Graph at {db} holds no symbols — reviews would find nothing."
+            stats["next"] = "call `rebuild`, or set PRGRAF_REPO to the project you meant"
+            return stats
+        stale = graph_staleness(store, repo, "HEAD")
+        if stale:
+            stats["stale"] = stale
+            stats["next"] = "call `rebuild` — the graph predates the current HEAD"
         return stats
 
 

@@ -21,8 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from codebase_rag.cli import review_pr_url  # noqa: E402
 from codebase_rag.graph.build import build_graph  # noqa: E402
 from codebase_rag.graph.pr import current_ref  # noqa: E402
-from codebase_rag.graph.review import review_range, web_payload  # noqa: E402
-from codebase_rag.graph.store import default_db_path  # noqa: E402
+from codebase_rag.graph.review import (  # noqa: E402
+    EmptyGraphError,
+    format_report,
+    review_range,
+    web_payload,
+)
+from codebase_rag.graph.store import GraphStore, default_db_path  # noqa: E402
 from test_pr import _make_remote_and_clone  # noqa: E402
 
 
@@ -141,6 +146,91 @@ def test_caller_is_found_across_files():
         for qn in f["top_impacted"]
     }
     assert "handler" in reached, f"cross-file caller missing: {reached}"
+
+
+def _repo_with_repeated_calls() -> Path:
+    """One caller, many call sites — the shape that inflated caller counts."""
+    root = Path(tempfile.mkdtemp(prefix="prgraf_dup_"))
+    _git(["init", "-q", "-b", "main"], root)
+    for key, value in (("user.email", "t@t.t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(["config", key, value], root)
+
+    (root / "core.py").write_text("def helper(x):\n    return x\n", encoding="utf-8")
+    (root / "caller.py").write_text(
+        "from core import helper\n\n\ndef only_caller(a):\n"
+        + "".join(f"    helper({i})\n" for i in range(8))
+        + "    return helper(a)\n",
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], root)
+    _git(["commit", "-qm", "one"], root)
+    (root / "core.py").write_text(
+        "def helper(x):\n    y = x + 1\n    return y\n", encoding="utf-8"
+    )
+    _git(["add", "-A"], root)
+    _git(["commit", "-qm", "two"], root)
+    return root
+
+
+def test_callers_counts_dependents_not_call_sites():
+    """Nine calls from one function is one dependent, not nine.
+
+    Raw edge rows made a symbol called in a loop read as widely depended on,
+    which fed the "many callers" risk term. Real graphs ran 60% duplicates.
+    """
+    repo = _repo_with_repeated_calls()
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db, full=True)
+
+    with GraphStore(db) as store:
+        target = next(
+            n for n in store.find_nodes("helper", limit=10) if n.kind != "File"
+        )
+        rows = store._conn.execute(  # noqa: SLF001
+            "SELECT COUNT(*) c FROM edges WHERE target_qualified = ? AND kind = 'CALLS'",
+            (target.qualified_name,),
+        ).fetchone()["c"]
+        callers = store.callers_of(target.qualified_name)
+
+    assert rows > len(callers), f"fixture did not repeat calls (rows={rows})"
+    names = [c.qualified_name for c in callers]
+    assert len(names) == len(set(names)), f"duplicate callers: {names}"
+
+
+def test_an_empty_graph_raises_instead_of_reading_as_clean():
+    """The worst failure this tool can have: silence that looks like a pass.
+
+    An empty graph yields zero changed symbols, which used to render as
+    "no reviewable symbols changed" — identical to a genuinely clean review.
+    """
+    repo = _repo_with_change()
+    db = default_db_path(repo)
+    GraphStore(db).close()  # creates the schema, inserts nothing
+
+    raised = None
+    try:
+        review_range(repo, base="HEAD~1", head="HEAD", db_path=db)
+    except EmptyGraphError as exc:
+        raised = exc
+    assert raised is not None, "an empty graph reported a clean review"
+    assert str(repo) in str(raised), "the error must name the root it used"
+
+
+def test_a_stale_graph_warns_at_minimal_detail():
+    """Agents stop at minimal; that is exactly where the warning must appear."""
+    repo = _repo_with_change()
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db, full=True)
+
+    with GraphStore(db) as store:
+        store.set_meta("last_build", "2000-01-01T00:00:00")
+
+    result = review_range(repo, base="HEAD~1", head="HEAD", db_path=db)
+    assert result.stale, "commit is newer than the build; staleness missed"
+    packet = result.to_dict(detail="minimal")
+    assert "warning" in packet, f"minimal packet hides staleness: {packet.keys()}"
+    assert "rebuild" in packet["warning"].lower()
+    assert "rebuild" in format_report(result).lower()
 
 
 def _run_all():
