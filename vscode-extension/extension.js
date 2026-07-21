@@ -378,7 +378,24 @@ function locateWebDir(python, cwd) {
   return null;
 }
 
-async function runReview(context, forcePick) {
+/** The branch a PR would target: origin's default, else main/master. */
+function defaultBranchOf(root) {
+  const run = (args) => {
+    try {
+      return cp.execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    } catch (_) {
+      return "";
+    }
+  };
+  const head = run(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (head) return `origin/${head.split("/").pop()}`;
+  for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
+    if (run(["rev-parse", "--verify", candidate])) return candidate;
+  }
+  return "HEAD~5";
+}
+
+async function runReview(context, forcePick, baseOverride) {
   const root = await resolveProjectRoot(context, forcePick);
   if (!root) return;
   // Remember it so the MCP server (and the agent) target the same project.
@@ -387,8 +404,12 @@ async function runReview(context, forcePick) {
 
   const cfg = vscode.workspace.getConfiguration("prgraf");
   const python = cfg.get("pythonPath", "python");
-  const base = cfg.get("base", "HEAD~1");
+  const base = baseOverride || cfg.get("base", "HEAD~1");
   const head = cfg.get("head", "HEAD");
+
+  // Kept so the panel's Explain button can re-run narration without redoing
+  // the whole graph build.
+  let lastPayload = null;
 
   const panel = vscode.window.createWebviewPanel(
     "prgraf.graph",
@@ -448,6 +469,7 @@ async function runReview(context, forcePick) {
             resolve();
             return;
           }
+          lastPayload = payload;
           panel.webview.html = renderHtml(webDir, payload);
           if (findingsProvider) findingsProvider.update(payload, root);
           // Narration is additive: the graph is already usable without it.
@@ -468,9 +490,26 @@ async function runReview(context, forcePick) {
       })
   );
 
-  // Let the graph open the clicked symbol's file in the editor.
   panel.webview.onDidReceiveMessage((msg) => {
-    if (msg && msg.type === "open" && msg.file) {
+    if (!msg) return;
+    // Explain / hand-off requested from the panel itself, so the LLM review is
+    // reachable where the findings are rather than only from the palette.
+    if (msg.type === "explain") {
+      if (lastPayload) narrate(panel, lastPayload, cfg.get("model", ""));
+      return;
+    }
+    if (msg.type === "askAgent") {
+      vscode.commands.executeCommand("prgraf.reviewInChat");
+      return;
+    }
+    if (msg.type === "widen") {
+      // HEAD~1 often lands on a config-only commit, which correctly finds
+      // nothing. Re-run against the default branch so the panel can show the
+      // whole branch's blast radius instead of a dead end.
+      runReview(context, false, defaultBranchOf(root));
+      return;
+    }
+    if (msg.type === "open" && msg.file) {
       const uri = vscode.Uri.file(path.join(root, msg.file));
       const line = Math.max(0, (msg.line || 1) - 1);
       vscode.window

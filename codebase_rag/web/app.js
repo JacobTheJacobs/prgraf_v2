@@ -58,26 +58,63 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+/** Buttons that let the reader ask for an explanation, so the feature is
+ *  visible even when no model answered — silence taught nobody it exists. */
+function summaryActions(label) {
+  if (!window.__prgrafHosted) return "";
+  return `<div class="sum-actions">
+      <button class="sum-btn" data-act="explain">${label}</button>
+      <button class="sum-btn ghost" data-act="agent">Ask an agent</button>
+    </div>`;
+}
+
+function wireSummaryActions(box) {
+  box.querySelectorAll(".sum-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const act = btn.dataset.act;
+      if (act === "explain") renderSummary(null, null, true);
+      window.__prgrafPost(act === "agent" ? "askAgent" : "explain");
+    });
+  });
+}
+
 function renderSummary(text, error, pending) {
   const box = $("summary");
   if (!box) return;
+  box.classList.remove("hidden");
+
   if (pending) {
     box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span>
       <span class="sum-wait">reading the graph…</span></div>`;
-    box.classList.remove("hidden");
     return;
   }
   if (error) {
     box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>
-      <p class="sum-error">${escapeHtml(error)}</p>`;
-    box.classList.remove("hidden");
+      <p class="sum-error">${escapeHtml(error)}</p>${summaryActions("Retry")}`;
+    wireSummaryActions(box);
     return;
   }
-  if (!text) { box.classList.add("hidden"); return; }
+  if (!text) {
+    // Idle: no explanation yet. Offer one instead of hiding the card, which
+    // is why this looked like a missing feature rather than an unused one.
+    box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span>
+      <span class="sum-wait">graph findings are ready</span></div>
+      ${summaryActions("Explain impact")}`;
+    wireSummaryActions(box);
+    return;
+  }
   const paras = String(text).split(/\n\s*\n/).filter(Boolean)
     .map((p) => `<p>${escapeHtml(p)}</p>`).join("");
-  box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>${paras}`;
-  box.classList.remove("hidden");
+  box.innerHTML = `<div class="sum-head"><span class="sum-tag">IMPACT</span></div>${paras}
+    ${summaryActions("Re-explain")}`;
+  wireSummaryActions(box);
+}
+
+function showIdleSummary(payload) {
+  // Only inside the editor: the browser app has no agent to hand off to.
+  if (!window.__prgrafHosted) return;
+  if (!(payload.findings || []).length) return;
+  renderSummary(null, null, false);
 }
 
 function enterEmbeddedMode(payload) {
@@ -95,18 +132,26 @@ function enterEmbeddedMode(payload) {
   const exportBtn = $("export-btn");
   if (exportBtn) exportBtn.remove();
   render(payload);
+  showIdleSummary(payload);
 }
 
 /* ---------------- data flow ---------------- */
 
+const PR_URL = /github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/i;
+
 async function runReview() {
+  const target = el.repo.value.trim() || ".";
+  const isPr = PR_URL.test(target);
   const body = {
-    repo_path: el.repo.value.trim() || ".",
-    base: el.base.value.trim() || "HEAD~1",
-    head: el.head.value.trim() || "HEAD",
+    repo_path: target,
+    // A PR carries its own range; base/head only apply to a local path.
+    base: isPr ? undefined : el.base.value.trim() || "HEAD~1",
+    head: isPr ? undefined : el.head.value.trim() || "HEAD",
   };
   setLoading(true);
-  el.status.textContent = "Building graph and reviewing…";
+  el.status.textContent = isPr
+    ? "Fetching the PR, building the graph…"
+    : "Building graph and reviewing…";
   try {
     const res = await fetch("/api/review", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -130,11 +175,21 @@ async function runReview() {
 
 function render(data) {
   renderVerdict(data.overall_risk, data.findings);
-  renderFindings(data.findings);
-  el.empty.classList.add("hidden");
-  el.toolbar.classList.remove("hidden");
-  renderLegend();
+  renderFindings(data.findings, data);
   closeDetail();
+  const hasGraph = ((data.graph && data.graph.nodes) || []).length > 0;
+  // Nothing to draw: keep the empty-state art rather than mounting an empty
+  // canvas with a legend for symbols that are not there.
+  el.empty.classList.toggle("hidden", hasGraph);
+  el.toolbar.classList.toggle("hidden", !hasGraph);
+  if (!hasGraph) {
+    el.rings.innerHTML = "";
+    el.edges.innerHTML = "";
+    el.nodes.innerHTML = "";
+    sim = null;
+    return;
+  }
+  renderLegend();
   sim = new RadialGraph(el, data);
   sim.start();
 }
@@ -156,11 +211,10 @@ function renderVerdict(overall, findings) {
   el.verdict.classList.remove("hidden");
 }
 
-function renderFindings(findings) {
+function renderFindings(findings, payload) {
   el.findings.innerHTML = "";
   if (!findings.length) {
-    el.findings.innerHTML = `<p style="color:var(--text-faint);font-size:13px;padding:8px 4px">
-      No symbols crossed the review bar.</p>`;
+    renderNothingToReview(payload);
     return;
   }
   findings.forEach((f, i) => {
@@ -189,6 +243,52 @@ function renderFindings(findings) {
     });
     el.findings.appendChild(card);
   });
+}
+
+/** An empty review is a real answer, but "nothing found" alone reads as a
+ *  broken tool. Say what was inspected and why it produced nothing, and offer
+ *  the next range to try. */
+function renderNothingToReview(payload) {
+  const files = (payload && payload.changed_files) || [];
+  const range = payload && payload.base
+    ? `${escapeHtml(payload.base)} … ${escapeHtml(payload.head || "HEAD")}`
+    : "this range";
+
+  let why;
+  if (!files.length) {
+    why = `<p>Nothing changed in <code>${range}</code>.</p>`;
+  } else {
+    const list = files.slice(0, 6).map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+    const more = files.length > 6 ? `<li>+${files.length - 6} more</li>` : "";
+    why = `<p><b>${files.length}</b> file(s) changed in <code>${range}</code>, but none
+      contain reviewable symbols — config, docs and data files have no callers
+      to trace.</p><ul class="nf-files">${list}${more}</ul>`;
+  }
+
+  el.findings.innerHTML =
+    `<div class="nothing-found">
+       <div class="nf-title">Nothing to review</div>
+       ${why}
+       ${window.__prgrafHosted
+         ? `<div class="sum-actions">
+              <button class="sum-btn" data-widen="1">Compare against the main branch</button>
+              <button class="sum-btn ghost" data-agent="1">Ask an agent</button>
+            </div>`
+         : ""}
+     </div>`;
+
+  const widen = el.findings.querySelector("[data-widen]");
+  if (widen) {
+    widen.addEventListener("click", () => {
+      widen.disabled = true;
+      widen.textContent = "Reviewing…";
+      window.__prgrafPost("widen");
+    });
+  }
+  // The agent path must stay reachable even with nothing to report: an empty
+  // graph result is exactly when you may want a second opinion on the branch.
+  const agent = el.findings.querySelector("[data-agent]");
+  if (agent) agent.addEventListener("click", () => window.__prgrafPost("askAgent"));
 }
 
 function renderLegend() {
@@ -525,6 +625,9 @@ class RadialGraph {
   }
 
   fit() {
+    // With no nodes the bounds stay at +/-Infinity and every transform comes
+    // out NaN, which the SVG rejects on each frame.
+    if (!this.nodes.length) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const n of this.nodes) {
       minX = Math.min(minX, n.x - n.r); minY = Math.min(minY, n.y - n.r);

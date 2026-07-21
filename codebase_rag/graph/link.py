@@ -17,6 +17,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from .extract import RECEIVER_CALL_CONFIDENCE
 from .store import GraphStore
 
 # Unqualified targets are only worth resolving via these edge kinds.
@@ -48,17 +49,33 @@ def link_graph(store: GraphStore) -> dict[str, int]:
     """Rewrite unresolved edge targets in place. Returns resolution counts."""
     conn = store._conn  # noqa: SLF001 - same package, intentional
 
-    # name -> [(qualified_name, file_path)]
-    by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    # name -> [(qualified_name, file_path, is_method)]
+    by_name: dict[str, list[tuple[str, str, bool]]] = defaultdict(list)
     # import spelling -> file qualified name
     by_module: dict[str, str] = {}
+    # qualified_name -> kind, so we can tell a class's method from a closure
+    # that merely happens to sit inside another function.
+    kind_by_qn: dict[str, str] = {}
+    pending: list[tuple[str, str, str, str | None]] = []
 
-    for row in conn.execute("SELECT qualified_name, name, file_path, kind FROM nodes"):
+    for row in conn.execute(
+        "SELECT qualified_name, name, file_path, kind, parent_name FROM nodes"
+    ):
+        kind_by_qn[row["qualified_name"]] = row["kind"]
         if row["kind"] == "File":
             for variant in _module_variants(row["file_path"]):
                 by_module.setdefault(variant, row["qualified_name"])
         else:
-            by_name[row["name"]].append((row["qualified_name"], row["file_path"]))
+            pending.append(
+                (row["qualified_name"], row["name"], row["file_path"], row["parent_name"])
+            )
+
+    for qn, name, file_path, parent_name in pending:
+        # A real method is declared inside a class. A nested arrow function is
+        # not, even though both carry a parent_name.
+        parent_qn = f"{file_path}::{parent_name}" if parent_name else None
+        is_method = bool(parent_qn) and kind_by_qn.get(parent_qn) == "Class"
+        by_name[name].append((qn, file_path, is_method))
 
     resolved = 0
     dropped = 0
@@ -66,8 +83,8 @@ def link_graph(store: GraphStore) -> dict[str, int]:
     deletions: list[tuple[int]] = []
 
     rows = conn.execute(
-        "SELECT id, kind, source_qualified, target_qualified, file_path FROM edges "
-        f"WHERE kind IN ({','.join('?' * len(_RESOLVABLE))})",
+        "SELECT id, kind, source_qualified, target_qualified, file_path, confidence "
+        f"FROM edges WHERE kind IN ({','.join('?' * len(_RESOLVABLE))})",
         _RESOLVABLE,
     ).fetchall()
 
@@ -85,8 +102,28 @@ def link_graph(store: GraphStore) -> dict[str, int]:
 
         source_file = row["file_path"]
         source_dir = str(Path(source_file).parent)
+        on_receiver = (row["confidence"] or 0) <= RECEIVER_CALL_CONFIDENCE
 
-        if len(candidates) == 1:
+        if on_receiver:
+            # `x.foo()` — the receiver's type is unknown, so the only safe
+            # bindings are a symbol in this same file, or a genuine method of
+            # a class elsewhere. Binding to an unrelated top-level function or
+            # a closure nested in some other function invents call graphs:
+            # `classList.add(...)` was resolving to a local `const add = ...`
+            # in a different file purely because the names matched.
+            same_file = [c for c in candidates if c[1] == source_file]
+            methods = [c for c in candidates if c[2]]
+            if same_file:
+                chosen, confidence = same_file[0][0], 0.7
+            elif len(methods) == 1:
+                chosen, confidence = methods[0][0], 0.6
+            elif methods:
+                chosen, confidence = sorted(methods)[0][0], 0.3
+            else:
+                deletions.append((row["id"],))
+                dropped += 1
+                continue
+        elif len(candidates) == 1:
             chosen, confidence = candidates[0][0], 0.9
         else:
             same_file = [c for c in candidates if c[1] == source_file]

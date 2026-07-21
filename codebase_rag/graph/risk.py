@@ -22,16 +22,22 @@ from .store import GraphNode, GraphStore
 
 # Unambiguous: appearing in a symbol name is itself the signal.
 STRONG_SECURITY_TERMS: frozenset[str] = frozenset({
-    "auth", "login", "logout", "password", "passwd", "token", "credential",
+    "auth", "login", "logout", "password", "passwd", "credential",
     "secret", "crypt", "encrypt", "decrypt", "permission", "privilege",
-    "admin", "session", "oauth", "jwt", "signin", "signup", "billing",
+    "oauth", "jwt", "signin", "signup", "billing",
     "payment", "charge", "refund", "invoice",
 })
 
 # Common in ordinary code. Only meaningful alongside a sensitive path.
+# "token" and "session" live here rather than above because they collide with
+# everyday vocabulary: in an LLM tool a token is a unit of text and a session
+# is a UI conversation. Scoring `turnTokenText` or `resetForNewSession` as a
+# security surface is exactly the noise this split exists to prevent. Real
+# auth usage still reaches full weight via the path check below.
 WEAK_SECURITY_TERMS: frozenset[str] = frozenset({
     "query", "request", "connect", "validate", "execute", "http", "socket",
     "sanitize", "hash", "sign", "verify", "escape", "serialize", "upload",
+    "token", "session", "admin",
 })
 
 # Directory/path markers that corroborate a weak term.
@@ -82,8 +88,12 @@ class RiskFactors:
             out.append("thin test coverage")
         if self.security >= 0.20:
             out.append("security- or money-sensitive surface")
-        elif self.security > 0:
+        elif self.security >= 0.15:
             out.append("sensitive path")
+        # A 0.05 score means a generic term that the path did NOT corroborate.
+        # Naming it "sensitive path" claimed the opposite of what was measured,
+        # so the weakest signal now contributes to the score without asserting
+        # something about the code that is not true.
         if self.callers >= 0.05:
             out.append("many callers")
         if self.breadth >= 0.10:

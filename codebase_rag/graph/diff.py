@@ -76,16 +76,31 @@ def parse_diff_ranges(diff_text: str) -> dict[str, list[tuple[int, int]]]:
     return {path: spans for path, spans in ranges.items() if spans}
 
 
+# Review what is on disk rather than a commit — the pre-commit case.
+WORKTREE = "WORKTREE"
+
+
 def changed_ranges(
     repo_root: str | Path,
     base: str,
     head: str = "HEAD",
 ) -> dict[str, list[tuple[int, int]]]:
-    """Changed line ranges per file for base...head."""
+    """Changed line ranges per file for base...head.
+
+    `head=WORKTREE` compares the working tree against base instead, which is
+    what a pre-commit review needs: the changes have not been committed yet,
+    so there is no head commit to diff against.
+    """
     repo_root = Path(repo_root)
     _validate_ref(base)
-    _validate_ref(head)
 
+    if head == WORKTREE:
+        # Uncommitted work, staged and unstaged. The graph is built from the
+        # same files on disk, so line numbers line up.
+        diff = _git(["diff", "--unified=0", base, "--"], repo_root)
+        return parse_diff_ranges(diff)
+
+    _validate_ref(head)
     merge_base = _git(["merge-base", base, head], repo_root).strip() or base
     _validate_ref(merge_base)
 
