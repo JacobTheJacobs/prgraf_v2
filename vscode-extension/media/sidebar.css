@@ -1,0 +1,309 @@
+/* prgraf sidebar — the same visual language as the Grok extension:
+ * monochrome, hairline borders, small type, and a 1px rail with dot markers
+ * instead of chevrons and filled blocks. Nothing here invents a colour; every
+ * surface is mixed from the editor's own theme so it sits in any palette. */
+
+:root {
+  --pad: 8px;
+  --gap: 6px;
+  --radius: 6px;
+  --pg-accent: var(--vscode-foreground, #e7e7e7);
+  --pg-muted: var(--vscode-descriptionForeground, #a8a8a8);
+  --pg-surface: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)) 74%, var(--vscode-sideBar-background));
+  --pg-surface-soft: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)) 46%, transparent);
+  --pg-border: color-mix(in srgb, var(--vscode-editorWidget-border, #3b3b3b) 80%, transparent);
+  --pg-hairline: color-mix(in srgb, var(--pg-border) 72%, transparent);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-font-family);
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  background: transparent;
+}
+
+/* ---------- setup: what gets reviewed ---------- */
+
+.setup {
+  padding: var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--pg-hairline);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 5px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.field:hover {
+  background: var(--pg-surface-soft);
+  border-color: var(--pg-hairline);
+}
+
+.field:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.field .label {
+  color: var(--pg-muted);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex: none;
+  width: 44px;
+}
+
+.field .value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field .value.dim { color: var(--pg-muted); }
+
+.field .chev {
+  flex: none;
+  color: var(--pg-muted);
+  opacity: 0.7;
+  font-size: 10px;
+}
+
+.go {
+  margin-top: 6px;
+  padding: 6px 10px;
+  width: 100%;
+  border: 1px solid var(--pg-border);
+  border-radius: var(--radius);
+  background: var(--pg-surface);
+  color: var(--vscode-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.go:hover { background: var(--pg-surface-strong, var(--pg-surface)); border-color: var(--pg-muted); }
+.go:disabled { opacity: 0.5; cursor: default; }
+
+/* ---------- run state: dots, not a spinner ---------- */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px var(--pad);
+  color: var(--pg-muted);
+  font-size: 11px;
+}
+
+.dots { display: inline-flex; align-items: center; gap: 3px; }
+
+.dots span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.dots span:nth-child(2) { animation-delay: 0.18s; }
+.dots span:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  50% { opacity: 0.9; transform: translateY(-1px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dots span { animation: none; opacity: 0.6; }
+}
+
+/* ---------- results ---------- */
+
+.overall {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px var(--pad) 4px;
+  color: var(--pg-muted);
+  font-size: 11px;
+}
+
+.overall .score {
+  color: var(--vscode-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.warn {
+  margin: 0 var(--pad) 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--pg-hairline);
+  border-radius: var(--radius);
+  background: var(--pg-surface-soft);
+  color: var(--pg-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.findings { padding: 2px var(--pad) var(--pad); }
+
+/* The rail: one continuous hairline down the run of findings, with a dot per
+ * finding sitting on it. Same idea as the Grok thinking/tool rail. */
+.finding {
+  position: relative;
+  padding: 6px 0 8px 18px;
+  cursor: pointer;
+}
+
+.finding::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--pg-hairline);
+}
+
+.finding:first-child::before { top: 11px; }
+.finding:last-child::before { bottom: auto; height: 11px; }
+.finding:first-child:last-child::before { display: none; }
+
+.dot {
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pg-muted);
+  opacity: 0.5;
+}
+
+/* Severity reads through opacity and fill, not hue — the sidebar stays
+ * monochrome, and P1 still pulls the eye first. */
+.finding[data-level="critical"] .dot,
+.finding[data-level="high"] .dot { opacity: 1; background: var(--pg-accent); }
+.finding[data-level="medium"] .dot { opacity: 0.75; }
+
+.finding:hover { background: var(--pg-surface-soft); border-radius: var(--radius); }
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sev {
+  flex: none;
+  color: var(--pg-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.where {
+  color: var(--pg-muted);
+  font-size: 10.5px;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facts {
+  margin-top: 3px;
+  color: var(--pg-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.facts .sep { opacity: 0.5; padding: 0 4px; }
+
+.reach { margin-top: 3px; font-size: 11px; color: var(--pg-muted); }
+
+.checkfirst {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  padding: 1px 6px;
+  border: 1px solid var(--pg-hairline);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--pg-muted);
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.chip:hover { color: var(--vscode-foreground); border-color: var(--pg-border); }
+
+/* ---------- empty + actions ---------- */
+
+.empty {
+  padding: 14px var(--pad);
+  color: var(--pg-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.empty b { color: var(--vscode-foreground); font-weight: 600; }
+
+.actions {
+  display: flex;
+  gap: 6px;
+  padding: 4px var(--pad) var(--pad);
+  flex-wrap: wrap;
+}
+
+.link {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.link:hover { text-decoration: underline; }
+
+.err {
+  margin: var(--pad);
+  padding: 8px;
+  border: 1px solid var(--pg-hairline);
+  border-radius: var(--radius);
+  background: var(--pg-surface-soft);
+  color: var(--pg-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

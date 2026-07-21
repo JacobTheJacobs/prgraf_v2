@@ -1,0 +1,20 @@
+# Never ship a build inside a build.
+**/*.vsix
+
+# Agent/tool scratch dirs — one of these leaked a token from a sibling
+# project's package once. Excluded by name, not by hoping they are absent.
+.gstack/**
+.prgraf/**
+.serena/**
+.swarm/**
+.beads/**
+.claude/**
+.vscode/**
+.git/**
+.gitignore
+.vscodeignore
+
+# Dev-only
+node_modules/**
+**/*.map
+**/.DS_Store

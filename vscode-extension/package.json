@@ -2,13 +2,16 @@
   "name": "prgraf",
   "displayName": "prgraf — blast-radius review",
   "description": "See what a change might break: an Obsidian-style blast-radius graph of your working diff, inside VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "jacobthejacobs",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["SCM Providers", "Visualization"],
+  "categories": [
+    "SCM Providers",
+    "Visualization"
+  ],
   "activationEvents": [],
   "main": "./extension.js",
   "contributes": {
@@ -60,16 +63,11 @@
         {
           "id": "prgraf.findings",
           "name": "Blast radius",
+          "type": "webview",
           "icon": "media/prgraf.svg"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "prgraf.findings",
-        "contents": "See what a change might break.\n[Review blast radius](command:prgraf.review)\nChanged symbols sit at the centre; everything they reach rings outward, closest first.\n\nWant an agent to dig in? [pick one](command:prgraf.chooseAgent) — Claude Code, Codex, Gemini, Grok, opencode, or VS Code chat — then [hand it the findings](command:prgraf.reviewInChat)."
-      }
-    ],
     "menus": {
       "scm/title": [
         {
@@ -112,7 +110,15 @@
         "prgraf.agent": {
           "type": "string",
           "default": "auto",
-          "enum": ["auto", "vscode", "claude", "codex", "gemini", "grok", "opencode"],
+          "enum": [
+            "auto",
+            "vscode",
+            "claude",
+            "codex",
+            "gemini",
+            "grok",
+            "opencode"
+          ],
           "enumDescriptions": [
             "First agent CLI found on PATH",
             "VS Code's built-in chat (agent mode)",

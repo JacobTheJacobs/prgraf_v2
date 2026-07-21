@@ -15,10 +15,12 @@ const path = require("path");
 const fs = require("fs");
 const { renderHtml, loadingHtml, errorHtml } = require("./webview");
 const { callSummary, listModels } = require("./summary");
-const { FindingsProvider } = require("./findingsView");
+const { SidebarProvider } = require("./sidebarView");
 const agents = require("./agents");
 
-let findingsProvider = null;
+let sidebar = null;
+/** Last successful review, so "Open graph" and "Explain" need no re-run. */
+let last = { payload: null, root: "", base: "", head: "" };
 
 /** Files that mark a directory as "a project you'd review", not a container.
  *  `.git` is checked as a direct child on purpose: walking up finds the
@@ -35,6 +37,9 @@ const SKIP_DIRS = new Set([
 
 const LAST_ROOT_KEY = "prgraf.lastRoot";
 
+/** Sentinel the engine reads as "the working tree", matching diff.WORKTREE. */
+const WORKTREE = "WORKTREE";
+
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("prgraf.review", () => runReview(context, false)),
@@ -45,14 +50,210 @@ function activate(context) {
     vscode.commands.registerCommand("prgraf.writeMcpConfig", () => writeMcpConfig(context))
   );
 
-  // Activity-bar view: findings survive after the graph panel is closed, and
-  // give the extension a home you can find without the command palette.
-  findingsProvider = new FindingsProvider();
+  // Activity-bar view. It owns the whole loop — choose what to review, run it,
+  // read the findings — so the extension is usable without the palette.
+  sidebar = new SidebarProvider(context.extensionUri, {
+    pickRepo: () => pickRepo(context),
+    pickAgent: () => pickAgent(),
+    pickBase: () => pickBase(context),
+    review: () => sidebarReview(context),
+    openGraph: () => openGraphPanel(context),
+    askAgent: () => vscode.commands.executeCommand("prgraf.reviewInChat"),
+    widen: () => sidebarReview(context, defaultBranchOf(currentRoot(context) || "")),
+    open: (file, line) => openInEditor(currentRoot(context), file, line),
+  });
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider("prgraf.findings", findingsProvider)
+    vscode.window.registerWebviewViewProvider("prgraf.findings", sidebar)
   );
+  syncSidebar(context);
 
   registerMcpServer(context);
+}
+
+/** Push host-side selections (repo, agent, base) into the view. */
+function syncSidebar(context) {
+  if (!sidebar) return;
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  const agent = agents.resolve(cfg.get("agent", "auto"));
+  sidebar.update({
+    repo: currentRoot(context) || "",
+    agentLabel: agent ? agent.label : "none found",
+    base: baseLabel(cfg),
+  });
+}
+
+/** Repo picker — the same candidates the auto-detector considers, plus Browse. */
+async function pickRepo(context) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  const candidates = [];
+  for (const folder of folders) {
+    const root = folder.uri.fsPath;
+    if (isProject(root)) candidates.push(root);
+    candidates.push(...childProjects(root));
+  }
+
+  const current = currentRoot(context);
+  const items = [...new Set(candidates)]
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)))
+    .map((dir) => ({
+      label: path.basename(dir),
+      description: dir === current ? "current" : "",
+      detail: dir,
+      dir,
+    }));
+  items.push({ label: "$(folder-opened) Browse…", detail: "pick any folder on disk", dir: null });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Which repository should prgraf review?",
+    matchOnDetail: true,
+  });
+  if (!pick) return;
+
+  let dir = pick.dir;
+  if (!dir) {
+    const chosen = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      openLabel: "Review this repository",
+    });
+    if (!chosen || !chosen.length) return;
+    dir = chosen[0].fsPath;
+  }
+
+  await context.workspaceState.update(LAST_ROOT_KEY, dir);
+  if (mcpDidChange) mcpDidChange.fire(); // the agent's tools follow the repo
+  // A new repo invalidates findings from the old one — showing them under a
+  // different repo name is worse than showing nothing.
+  last = { payload: null, root: "", base: "", head: "" };
+  sidebar.update({ payload: null, error: "" });
+  syncSidebar(context);
+}
+
+/** Provider picker, from the sidebar. Delegates to the same command the
+ *  palette uses so there is one implementation of "choose an agent". */
+async function pickAgent() {
+  await chooseAgent();
+  syncSidebarFromConfig();
+}
+
+function syncSidebarFromConfig() {
+  if (!sidebar) return;
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  const agent = agents.resolve(cfg.get("agent", "auto"));
+  sidebar.update({
+    agentLabel: agent ? agent.label : "none found",
+    base: baseLabel(cfg),
+  });
+}
+
+/** How the range reads in the sidebar: a ref, or the word for the worktree. */
+function baseLabel(cfg) {
+  return cfg.get("head", "HEAD") === WORKTREE ? "Uncommitted" : cfg.get("base", "HEAD~1");
+}
+
+/** What to diff against. Presets cover the cases that actually come up.
+ *  "Uncommitted" is base=HEAD with the WORKTREE sentinel as head — the same
+ *  pair the CLI's --uncommitted builds, so both surfaces mean one thing. */
+async function pickBase(context) {
+  const root = currentRoot(context);
+  const items = [
+    { label: "HEAD~1", description: "the last commit", base: "HEAD~1", head: "HEAD" },
+    { label: "HEAD~3", description: "the last three commits", base: "HEAD~3", head: "HEAD" },
+    {
+      label: "Uncommitted",
+      description: "working tree, nothing committed yet",
+      base: "HEAD",
+      head: WORKTREE,
+    },
+  ];
+  if (root) {
+    const branch = defaultBranchOf(root);
+    items.push({
+      label: branch,
+      description: "the whole branch, as a PR would see it",
+      base: branch,
+      head: "HEAD",
+    });
+  }
+  items.push({ label: "$(edit) Custom…", description: "any git ref", base: null, head: "HEAD" });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Review changes since…",
+  });
+  if (!pick) return;
+
+  let base = pick.base;
+  if (base === null) {
+    base = await vscode.window.showInputBox({
+      prompt: "Base ref to diff against",
+      value: vscode.workspace.getConfiguration("prgraf").get("base", "HEAD~1"),
+    });
+    if (!base) return;
+  }
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  await cfg.update("base", base, vscode.ConfigurationTarget.Global);
+  await cfg.update("head", pick.head, vscode.ConfigurationTarget.Global);
+  syncSidebarFromConfig();
+}
+
+function openInEditor(root, file, line) {
+  if (!root || !file) return;
+  const uri = vscode.Uri.file(path.join(root, file));
+  const at = Math.max(0, (line || 1) - 1);
+  vscode.window
+    .showTextDocument(uri, { selection: new vscode.Range(at, 0, at, 0) })
+    .then(undefined, () => {
+      vscode.window.setStatusBarMessage(`prgraf: could not open ${file}`, 3000);
+    });
+}
+
+/** Review driven from the sidebar: no panel, findings land in the view. */
+async function sidebarReview(context, baseOverride) {
+  const root = currentRoot(context) || (await resolveProjectRoot(context, false));
+  if (!root) {
+    sidebar.update({ error: "Open a folder, or pick a repository above." });
+    return;
+  }
+  await context.workspaceState.update(LAST_ROOT_KEY, root);
+  if (mcpDidChange) mcpDidChange.fire();
+
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  const base = baseOverride || cfg.get("base", "HEAD~1");
+  const head = cfg.get("head", "HEAD");
+
+  sidebar.update({ repo: root, busy: true, error: "", payload: null });
+  const result = await runEngine(cfg.get("pythonPath", "python"), root, base, head);
+  if (result.error) {
+    sidebar.update({ busy: false, error: result.error });
+    return;
+  }
+  last = { payload: result.payload, root, base, head };
+  sidebar.update({ busy: false, payload: result.payload, error: "" });
+}
+
+/** Render the last review's graph in a panel, without recomputing it. */
+function openGraphPanel(context) {
+  if (!last.payload) {
+    vscode.commands.executeCommand("prgraf.review");
+    return;
+  }
+  const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
+  const webDir = locateWebDir(python, last.root);
+  const panel = vscode.window.createWebviewPanel(
+    "prgraf.graph",
+    `prgraf · ${path.basename(last.root)}`,
+    vscode.ViewColumn.Beside,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  if (!webDir) {
+    panel.webview.html = errorHtml(
+      "prgraf package not found for the configured interpreter.\n" +
+      "Run: pip install -e .   (or set prgraf.pythonPath)"
+    );
+    return;
+  }
+  panel.webview.html = renderHtml(webDir, last.payload);
+  wirePanelMessages(context, panel, last.root);
 }
 
 /** Let the user pick which chat model narrates — any vendor the editor has. */
@@ -395,107 +596,73 @@ function defaultBranchOf(root) {
   return "HEAD~5";
 }
 
-async function runReview(context, forcePick, baseOverride) {
-  const root = await resolveProjectRoot(context, forcePick);
-  if (!root) return;
-  // Remember it so the MCP server (and the agent) target the same project.
-  await context.workspaceState.update(LAST_ROOT_KEY, root);
-  if (mcpDidChange) mcpDidChange.fire();
-
-  const cfg = vscode.workspace.getConfiguration("prgraf");
-  const python = cfg.get("pythonPath", "python");
-  const base = baseOverride || cfg.get("base", "HEAD~1");
-  const head = cfg.get("head", "HEAD");
-
-  // Kept so the panel's Explain button can re-run narration without redoing
-  // the whole graph build.
-  let lastPayload = null;
-
-  const panel = vscode.window.createWebviewPanel(
-    "prgraf.graph",
-    `prgraf · ${path.basename(root)}`,
-    vscode.ViewColumn.Beside,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
-  panel.webview.html = loadingHtml(path.basename(root));
-
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `prgraf: reviewing ${path.basename(root)}…` },
-    () =>
-      new Promise((resolve) => {
-        const args = ["-m", "codebase_rag.graph.export_cli", "--repo", root, "--base", base, "--head", head];
-        const opts = {
-          cwd: root,
-          maxBuffer: 64 * 1024 * 1024,
-          // Never hang forever: a runaway index should surface, not spin.
-          timeout: 5 * 60 * 1000,
-        };
-        const child = cp.execFile(python, args, opts, (err, stdout, stderr) => {
-          if (err && err.killed) {
-            panel.webview.html = errorHtml(
-              "Timed out after 5 minutes.\n\nThis folder may be larger than expected. " +
-              "Run 'prgraf: Review blast radius in…' to pick a specific project."
-            );
-            resolve();
-            return;
-          }
-          if (err && !stdout) {
-            panel.webview.html = errorHtml(`Engine failed.\n\n${stderr || err.message}`);
-            resolve();
-            return;
-          }
-          let payload;
-          try {
-            payload = JSON.parse(stdout);
-          } catch (e) {
-            panel.webview.html = errorHtml(`Could not parse engine output.\n\n${stderr || String(e)}`);
-            resolve();
-            return;
-          }
-          if (payload.status === "error") {
-            panel.webview.html = errorHtml(payload.message || "Review failed.");
-            resolve();
-            return;
-          }
-          payload.repo = root;
-          payload.base = base;
-          payload.head = head;
-          const webDir = locateWebDir(python, root);
-          if (!webDir) {
-            panel.webview.html = errorHtml(
-              "prgraf package not found for the configured interpreter.\n" +
-              "Run: pip install -e .   (or set prgraf.pythonPath)"
-            );
-            resolve();
-            return;
-          }
-          lastPayload = payload;
-          panel.webview.html = renderHtml(webDir, payload);
-          if (findingsProvider) findingsProvider.update(payload, root);
-          // Narration is additive: the graph is already usable without it.
-          if (cfg.get("summary", true) && (payload.findings || []).length) {
-            narrate(panel, payload, cfg.get("model", ""));
-          }
-          resolve();
+/**
+ * Run the engine once. Resolves to {payload} or {error} — never throws, and
+ * never touches a view, so the sidebar and the graph panel share exactly one
+ * implementation of "review this range".
+ */
+function runEngine(python, root, base, head, onProgress) {
+  return new Promise((resolve) => {
+    const args = [
+      "-m", "codebase_rag.graph.export_cli",
+      "--repo", root, "--base", base, "--head", head,
+    ];
+    const opts = {
+      cwd: root,
+      maxBuffer: 64 * 1024 * 1024,
+      // Never hang forever: a runaway index should surface, not spin.
+      timeout: 5 * 60 * 1000,
+    };
+    const child = cp.execFile(python, args, opts, (err, stdout, stderr) => {
+      if (err && err.killed) {
+        resolve({
+          error:
+            "Timed out after 5 minutes.\n\nThis folder may be larger than expected. " +
+            "Pick a specific project with the Repo field.",
         });
+        return;
+      }
+      if (err && !stdout) {
+        resolve({ error: `Engine failed.\n\n${stderr || err.message}` });
+        return;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(stdout);
+      } catch (e) {
+        resolve({ error: `Could not parse engine output.\n\n${stderr || String(e)}` });
+        return;
+      }
+      if (payload.status === "error") {
+        resolve({ error: payload.message || "Review failed." });
+        return;
+      }
+      payload.repo = root;
+      payload.base = base;
+      payload.head = head;
+      resolve({ payload });
+    });
 
-        // The engine logs progress to stderr; echo the latest line into the
-        // loading screen so a long build reads as working, not frozen.
-        if (child.stderr) {
-          child.stderr.on("data", (chunk) => {
-            const line = String(chunk).trim().split("\n").pop();
-            if (line) panel.webview.html = loadingHtml(path.basename(root), line.slice(0, 160));
-          });
-        }
-      })
-  );
+    // The engine logs progress to stderr; echo the latest line so a long
+    // build reads as working, not frozen.
+    if (child.stderr && onProgress) {
+      child.stderr.on("data", (chunk) => {
+        const line = String(chunk).trim().split("\n").pop();
+        if (line) onProgress(line.slice(0, 160));
+      });
+    }
+  });
+}
 
+/** Panel-side actions. Split out so both entry points wire the same handlers. */
+function wirePanelMessages(context, panel, root) {
+  const cfg = vscode.workspace.getConfiguration("prgraf");
   panel.webview.onDidReceiveMessage((msg) => {
     if (!msg) return;
     // Explain / hand-off requested from the panel itself, so the LLM review is
     // reachable where the findings are rather than only from the palette.
     if (msg.type === "explain") {
-      if (lastPayload) narrate(panel, lastPayload, cfg.get("model", ""));
+      if (last.payload) narrate(panel, last.payload, cfg.get("model", ""));
       return;
     }
     if (msg.type === "askAgent") {
@@ -510,18 +677,65 @@ async function runReview(context, forcePick, baseOverride) {
       return;
     }
     if (msg.type === "open" && msg.file) {
-      const uri = vscode.Uri.file(path.join(root, msg.file));
-      const line = Math.max(0, (msg.line || 1) - 1);
-      vscode.window
-        .showTextDocument(uri, {
-          viewColumn: vscode.ViewColumn.One,
-          selection: new vscode.Range(line, 0, line, 0),
-        })
-        .then(undefined, () => {
-          vscode.window.setStatusBarMessage(`prgraf: could not open ${msg.file}`, 3000);
-        });
+      openInEditor(root, msg.file, msg.line);
     }
   });
+}
+
+async function runReview(context, forcePick, baseOverride) {
+  const root = await resolveProjectRoot(context, forcePick);
+  if (!root) return;
+  // Remember it so the MCP server (and the agent) target the same project.
+  await context.workspaceState.update(LAST_ROOT_KEY, root);
+  if (mcpDidChange) mcpDidChange.fire();
+  syncSidebar(context);
+
+  const cfg = vscode.workspace.getConfiguration("prgraf");
+  const python = cfg.get("pythonPath", "python");
+  const base = baseOverride || cfg.get("base", "HEAD~1");
+  const head = cfg.get("head", "HEAD");
+
+  const panel = vscode.window.createWebviewPanel(
+    "prgraf.graph",
+    `prgraf · ${path.basename(root)}`,
+    vscode.ViewColumn.Beside,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  panel.webview.html = loadingHtml(path.basename(root));
+  if (sidebar) sidebar.update({ repo: root, busy: true, error: "", payload: null });
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `prgraf: reviewing ${path.basename(root)}…` },
+    () =>
+      runEngine(python, root, base, head, (line) => {
+        panel.webview.html = loadingHtml(path.basename(root), line);
+      })
+  );
+
+  if (result.error) {
+    panel.webview.html = errorHtml(result.error);
+    if (sidebar) sidebar.update({ busy: false, error: result.error });
+    return;
+  }
+
+  const webDir = locateWebDir(python, root);
+  if (!webDir) {
+    const msg =
+      "prgraf package not found for the configured interpreter.\n" +
+      "Run: pip install -e .   (or set prgraf.pythonPath)";
+    panel.webview.html = errorHtml(msg);
+    if (sidebar) sidebar.update({ busy: false, error: msg });
+    return;
+  }
+
+  last = { payload: result.payload, root, base, head };
+  panel.webview.html = renderHtml(webDir, result.payload);
+  if (sidebar) sidebar.update({ busy: false, payload: result.payload, error: "" });
+  // Narration is additive: the graph is already usable without it.
+  if (cfg.get("summary", true) && (result.payload.findings || []).length) {
+    narrate(panel, result.payload, cfg.get("model", ""));
+  }
+  wirePanelMessages(context, panel, root);
 }
 
 /** Ask the language model to explain the already-computed findings, then push
