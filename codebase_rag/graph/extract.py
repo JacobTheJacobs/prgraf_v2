@@ -96,6 +96,10 @@ NOISY_CALLEES = frozenset({
 
 _TEST_PATH_HINTS = ("test", "spec", "__tests__")
 
+# Marks a CALLS edge as `x.foo()` rather than `foo()`. link.py uses it to
+# decide how much evidence is needed before binding the name to a symbol.
+RECEIVER_CALL_CONFIDENCE = 0.25
+
 _parser_cache: dict[str, object] = {}
 
 
@@ -132,12 +136,13 @@ def _is_test_path(file_path: str) -> bool:
     )
 
 
-def _callee_name(call_node, source: bytes, language: str) -> str | None:
-    """Bare name at a call site.
+def _callee_name(call_node, source: bytes, language: str) -> tuple[str, bool] | None:
+    """Callee name at a call site, plus whether it was called on a receiver.
 
-    We take the rightmost identifier: `a.b.c()` yields `c`. Precision is
-    recovered in link.py, which prefers same-file then same-directory
-    candidates when a name is ambiguous.
+    Returns `(name, on_receiver)`. `foo()` is a bare call; `x.foo()` is a call
+    on a receiver, and we do not know x's type. That distinction matters at
+    link time: `classList.add(...)` must not bind to some unrelated top-level
+    `add` just because the names match.
     """
     func = call_node.child_by_field_name("function") or call_node.child_by_field_name(
         "constructor"
@@ -145,7 +150,7 @@ def _callee_name(call_node, source: bytes, language: str) -> str | None:
     if func is None:
         return None
     if func.type in ("identifier", "type_identifier"):
-        return _text(func, source)
+        return _text(func, source), False
     # attribute / member_expression / selector_expression
     attr = (
         func.child_by_field_name("attribute")
@@ -153,11 +158,11 @@ def _callee_name(call_node, source: bytes, language: str) -> str | None:
         or func.child_by_field_name("field")
     )
     if attr is not None:
-        return _text(attr, source)
+        return _text(attr, source), True
     if func.named_child_count:
         last = func.named_children[-1]
         if last.type in ("identifier", "property_identifier", "field_identifier"):
-            return _text(last, source)
+            return _text(last, source), True
     return None
 
 
@@ -295,7 +300,8 @@ def extract_file(
                 continue
 
             if child.type in spec.calls:
-                callee = _callee_name(child, source, language)
+                found = _callee_name(child, source, language)
+                callee, on_receiver = found if found else (None, False)
                 if callee and callee not in NOISY_CALLEES and len(callee) > 2:
                     edges.append(
                         GraphEdge(
@@ -304,7 +310,9 @@ def extract_file(
                             target_qualified=callee,
                             file_path=file_path,
                             line=child.start_point[0] + 1,
-                            confidence=0.5,
+                            # The link pass reads this back: a receiver call is
+                            # weaker evidence and gets resolved more strictly.
+                            confidence=RECEIVER_CALL_CONFIDENCE if on_receiver else 0.5,
                         )
                     )
                 walk(child, scope_qn, scope_name)

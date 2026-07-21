@@ -141,6 +141,57 @@ def test_diff_seeds_at_symbol_level():
     assert "auth/session.py::hash_pw" not in names
 
 
+def test_receiver_call_does_not_bind_to_an_unrelated_function():
+    """`x.add(...)` must not resolve to some top-level `add` elsewhere.
+
+    An agent reviewing a real PR reported a webview->host call edge that did
+    not exist: `classList.add(...)` had bound to a `const add = ...` closure in
+    another file purely on the name.
+    """
+    root = _make_repo()
+    (root / "ui.py").write_text(
+        "def paint(el):\n"
+        "    el.classList.add('on')\n",
+        encoding="utf-8",
+    )
+    (root / "helpers.py").write_text(
+        "def wrapper():\n"
+        "    def add(raw):\n"
+        "        return raw\n"
+        "    return add\n",
+        encoding="utf-8",
+    )
+    store = _store(root)
+    targets = {
+        e.target_qualified
+        for e in store.edges_between({
+            n.qualified_name for n in store.find_nodes("paint", limit=5)
+        } | {n.qualified_name for n in store.find_nodes("add", limit=5)})
+    }
+    assert not any("helpers.py" in t for t in targets), targets
+
+
+def test_receiver_call_still_binds_to_a_real_method():
+    """The strict rule must not sever genuine cross-file method calls."""
+    root = _make_repo()
+    (root / "svc.py").write_text(
+        "class Store:\n"
+        "    def fetch(self):\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    (root / "use.py").write_text(
+        "from svc import Store\n"
+        "\n"
+        "def run(store):\n"
+        "    return store.fetch()\n",
+        encoding="utf-8",
+    )
+    store = _store(root)
+    callers = {c.name for c in store.callers_of("svc.py::Store.fetch")}
+    assert "run" in callers, callers
+
+
 def test_diff_seeds_innermost_symbol_not_enclosing_class():
     """A change inside a method must not also seed its class.
 
