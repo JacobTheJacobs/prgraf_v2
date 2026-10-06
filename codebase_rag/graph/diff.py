@@ -19,8 +19,9 @@ from .store import GraphNode, GraphStore
 # Refs reach subprocess, so validate before they ever get there.
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_FILE_RE = re.compile(r"^\+\+\+ (?:b/(.+)|/dev/null)$")
+_OLD_FILE_RE = re.compile(r"^--- (?:a/(.+)|/dev/null)$")
 
 GIT_TIMEOUT = 30
 
@@ -37,7 +38,9 @@ def _validate_ref(ref: str) -> str:
 
 def _git(args: list[str], cwd: Path) -> str:
     return subprocess.run(  # noqa: S603 - list args, no shell
-        ["git", *args],
+        # quotePath off: otherwise a non-ASCII path arrives as "b/\327\251..."
+        # and never matches the graph's file paths.
+        ["git", "-c", "core.quotePath=false", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -50,34 +53,89 @@ def _git(args: list[str], cwd: Path) -> str:
 
 
 def parse_diff_ranges(diff_text: str) -> dict[str, list[tuple[int, int]]]:
-    """Unified diff -> {file: [(start_line, end_line), ...]} on the new side."""
+    """Unified diff -> {file: [(start_line, end_line), ...]} on the new side.
+
+    A pure deletion has no new lines. It is recorded as (n + 1, n), where n is
+    the line the removed block sat after: that overlaps only a symbol spanning
+    both sides of the gap, i.e. one the lines were removed from the inside of.
+    A symbol that merely ends or starts next to the gap is not implicated.
+    """
     ranges: dict[str, list[tuple[int, int]]] = {}
     current: str | None = None
 
     for line in diff_text.splitlines():
         file_match = _FILE_RE.match(line)
         if file_match:
-            current = file_match.group(1).replace("\\", "/")
-            ranges.setdefault(current, [])
+            # `+++ /dev/null` is a deleted file: no new side to map onto.
+            current = file_match.group(1)
+            if current:
+                current = current.replace("\\", "/")
+                ranges.setdefault(current, [])
             continue
 
         hunk = _HUNK_RE.match(line)
         if hunk and current:
-            start = int(hunk.group(1))
-            count = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            start = int(hunk.group(3))
+            count = int(hunk.group(4)) if hunk.group(4) is not None else 1
             if count == 0:
-                # Pure deletion: no new lines exist. Anchor on the line the
-                # removed block sat against so the surrounding symbol is
-                # still implicated.
-                ranges[current].append((start, start))
+                ranges[current].append((start + 1, start))
             else:
                 ranges[current].append((start, start + count - 1))
 
     return {path: spans for path, spans in ranges.items() if spans}
 
 
+def parse_removed_ranges(diff_text: str) -> list[tuple[str, str | None, list[tuple[int, int]]]]:
+    """Unified diff -> [(old_path, new_path, removed old-side ranges)].
+
+    new_path is None for a deleted file, and differs from old_path on a rename.
+    Added files have no old side and are not listed.
+    """
+    out: list[tuple[str, str | None, list[tuple[int, int]]]] = []
+    old_path: str | None = None
+    entry: tuple[str, str | None, list[tuple[int, int]]] | None = None
+
+    for line in diff_text.splitlines():
+        old_match = _OLD_FILE_RE.match(line)
+        if old_match:
+            old_path = old_match.group(1)
+            entry = None
+            continue
+        new_match = _FILE_RE.match(line)
+        if new_match:
+            if old_path:
+                entry = (old_path, new_match.group(1), [])
+                out.append(entry)
+            old_path = None
+            continue
+        hunk = _HUNK_RE.match(line)
+        if hunk and entry:
+            start = int(hunk.group(1))
+            count = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            if count:
+                entry[2].append((start, start + count - 1))
+
+    return [e for e in out if e[2]]
+
+
 # Review what is on disk rather than a commit — the pre-commit case.
 WORKTREE = "WORKTREE"
+
+
+def _diff_text(repo_root: Path, base: str, head: str) -> tuple[str, str]:
+    """(diff, old-side commit) for base...head, or base vs the working tree."""
+    _validate_ref(base)
+
+    if head == WORKTREE:
+        # Uncommitted work, staged and unstaged. The graph is built from the
+        # same files on disk, so line numbers line up.
+        return _git(["diff", "--unified=0", "-M", base, "--"], repo_root), base
+
+    _validate_ref(head)
+    merge_base = _git(["merge-base", base, head], repo_root).strip() or base
+    _validate_ref(merge_base)
+    diff = _git(["diff", "--unified=0", "-M", f"{merge_base}...{head}", "--"], repo_root)
+    return diff, merge_base
 
 
 def changed_ranges(
@@ -91,21 +149,55 @@ def changed_ranges(
     what a pre-commit review needs: the changes have not been committed yet,
     so there is no head commit to diff against.
     """
-    repo_root = Path(repo_root)
-    _validate_ref(base)
-
-    if head == WORKTREE:
-        # Uncommitted work, staged and unstaged. The graph is built from the
-        # same files on disk, so line numbers line up.
-        diff = _git(["diff", "--unified=0", base, "--"], repo_root)
-        return parse_diff_ranges(diff)
-
-    _validate_ref(head)
-    merge_base = _git(["merge-base", base, head], repo_root).strip() or base
-    _validate_ref(merge_base)
-
-    diff = _git(["diff", "--unified=0", f"{merge_base}...{head}", "--"], repo_root)
+    diff, _ = _diff_text(Path(repo_root), base, head)
     return parse_diff_ranges(diff)
+
+
+def removed_symbols(
+    store: GraphStore,
+    repo_root: str | Path,
+    base: str,
+    head: str = "HEAD",
+) -> list[GraphNode]:
+    """Symbols that existed on the old side and are gone on the new one.
+
+    The graph only knows the new side, so a deleted function leaves no node to
+    seed — yet its callers are the most certain breakage a PR can cause. The
+    old version of each touched file is re-parsed from git to find them.
+    """
+    from .extract import extract_file, language_for
+
+    repo_root = Path(repo_root)
+    diff, old_commit = _diff_text(repo_root, base, head)
+    gone: list[GraphNode] = []
+
+    for old_path, new_path, removed in parse_removed_ranges(diff):
+        language = language_for(old_path)
+        if language is None:
+            continue
+        source = _git(["show", f"{old_commit}:{old_path}"], repo_root)
+        if not source:
+            continue
+        old_nodes, _ = extract_file(old_path, source.encode("utf-8"), language)
+        surviving = {
+            (n.name, n.parent_name) for n in store.get_nodes_by_file(new_path)
+        } if new_path else set()
+
+        classes = {n.name for n in old_nodes if n.kind == "Class"}
+        for node in old_nodes:
+            if node.kind == "File":
+                continue
+            if not any(node.line_start <= end and node.line_end >= start for start, end in removed):
+                continue
+            # Same name in the same (possibly renamed) file: edited, not removed.
+            if (node.name, node.parent_name) in surviving:
+                continue
+            node.extra = {"deleted": True, "method": node.parent_name in classes}
+            gone.append(node)
+
+    if gone:
+        logger.info(f"Found {len(gone)} removed symbol(s)")
+    return gone
 
 
 def map_ranges_to_nodes(

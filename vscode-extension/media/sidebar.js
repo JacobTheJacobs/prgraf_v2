@@ -122,7 +122,10 @@ function renderResults(state) {
   }
   // The engine's own staleness warning, surfaced where the findings are —
   // a stale graph produces confident output, so it must travel with it.
-  if (payload.stale) {
+  if (payload.stale && payload.stale.message) {
+    // Checked-out tree differs from the reviewed head; the engine says why.
+    parts.push(`<div class="warn">${esc(payload.stale.message)}</div>`);
+  } else if (payload.stale) {
     parts.push(
       `<div class="warn">Graph built ${esc(payload.stale.graph_built)}, code changed ` +
       `${esc(payload.stale.code_changed)}. Line numbers may be off — review again to rebuild.</div>`

@@ -83,26 +83,39 @@ def link_graph(store: GraphStore) -> dict[str, int]:
     deletions: list[tuple[int]] = []
 
     rows = conn.execute(
-        "SELECT id, kind, source_qualified, target_qualified, file_path, confidence "
+        "SELECT id, kind, source_qualified, target_qualified, file_path, line, confidence "
         f"FROM edges WHERE kind IN ({','.join('?' * len(_RESOLVABLE))})",
         _RESOLVABLE,
     ).fetchall()
 
+    unresolved: list[tuple[str, str, str, int, int]] = []
+
     for row in rows:
         target = row["target_qualified"]
-        # Already qualified (contains the file::symbol separator).
+        on_receiver = (row["confidence"] or 0) <= RECEIVER_CALL_CONFIDENCE
         if "::" in target:
-            continue
+            if target in kind_by_qn:
+                continue  # already resolved, and the target still exists
+            # Resolved on an earlier build to a symbol that has since been
+            # deleted or moved. An incremental build only re-links the files
+            # it re-parsed, so without this the caller keeps pointing at a
+            # ghost and the graph diverges from what a full build produces.
+            target = target.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+            on_receiver = False
 
         candidates = by_name.get(target)
         if not candidates:
             deletions.append((row["id"],))
+            if row["kind"] == "CALLS":
+                unresolved.append((
+                    row["source_qualified"], target, row["file_path"],
+                    row["line"] or 0, int(on_receiver),
+                ))
             dropped += 1
             continue
 
         source_file = row["file_path"]
         source_dir = str(Path(source_file).parent)
-        on_receiver = (row["confidence"] or 0) <= RECEIVER_CALL_CONFIDENCE
 
         if on_receiver:
             # `x.foo()` — the receiver's type is unknown, so the only safe
@@ -178,6 +191,12 @@ def link_graph(store: GraphStore) -> dict[str, int]:
             )
         if deletions:
             conn.executemany("DELETE FROM edges WHERE id = ?", deletions)
+        if unresolved:
+            conn.executemany(
+                "INSERT INTO unresolved (source_qualified, name, file_path, line, on_receiver) "
+                "VALUES (?,?,?,?,?)",
+                unresolved,
+            )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

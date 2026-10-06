@@ -161,8 +161,10 @@ async function runReview() {
     if (!res.ok || data.status === "error") throw new Error(data.message || `HTTP ${res.status}`);
     window.__lastReview = { ...data, repo: body.repo_path, base: body.base, head: body.head };
     render(data);
-    el.status.textContent =
-      `${data.findings.length} finding(s) · ${data.graph.nodes.length} nodes in radius`;
+    // An empty or partial review may omit either list; count what is there.
+    const nFindings = (data.findings || []).length;
+    const nNodes = ((data.graph && data.graph.nodes) || []).length;
+    el.status.textContent = `${nFindings} finding(s) · ${nNodes} nodes in radius`;
     const exportBtn = $("export-btn");
     if (exportBtn) exportBtn.classList.remove("hidden");
   } catch (err) {
@@ -213,6 +215,7 @@ function renderVerdict(overall, findings) {
 
 function renderFindings(findings, payload) {
   el.findings.innerHTML = "";
+  findings = findings || [];
   if (!findings.length) {
     renderNothingToReview(payload);
     return;

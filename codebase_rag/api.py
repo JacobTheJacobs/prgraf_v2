@@ -14,7 +14,6 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -42,9 +41,31 @@ class LogStore:
 
 
 app = FastAPI(title="prgraf — blast-radius review")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
+
+# The UI is served from this same server, so no cross-origin access is needed.
+# Wildcard CORS let any website a user visited drive this API: clone repos,
+# check out their local clone, index arbitrary paths, read the logs.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+
+def _host_of(value: str) -> str:
+    host = value.split("://", 1)[-1].split("/", 1)[0]
+    return host if host.startswith("[") and host.endswith("]") else host.rsplit(":", 1)[0]
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    """Refuse requests from other sites, and DNS-rebinding hostnames.
+
+    A missing Origin is allowed (curl, same-origin GET). `null` is not: a
+    sandboxed iframe on any site sends it. The HTML export never calls the API.
+    """
+    host = _host_of(request.headers.get("host", ""))
+    origin = request.headers.get("origin")
+    if host not in _LOCAL_HOSTS or (origin is not None and _host_of(origin) not in _LOCAL_HOSTS):
+        return JSONResponse({"status": "error", "message": "forbidden origin"}, status_code=403)
+    return await call_next(request)
+
 
 log_store = LogStore()
 logger.add(log_store.sink, format="{message}", level="INFO")
@@ -107,10 +128,11 @@ async def review(request: Request):
         # left from a different checkout has stale line numbers, which silently
         # maps the diff onto the wrong symbols.
         db = default_db_path(repo)
-        build_graph(repo, db_path=db)
-
         render_cap = int(data.get("render_cap") or 160)
         try:
+            # Inside the try: a failed build must still put the user's clone
+            # back, or it is left detached on the PR head.
+            build_graph(repo, db_path=db)
             result = review_range(repo, base=base, head=head, db_path=db)
         finally:
             if restore_to and restore_repo:

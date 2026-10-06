@@ -233,6 +233,94 @@ def test_a_stale_graph_warns_at_minimal_detail():
     assert "rebuild" in format_report(result).lower()
 
 
+def test_a_removed_function_that_is_still_called_is_a_finding():
+    """Deleting code is the surest way to break a caller; it must surface."""
+    repo = _repo_with_change()
+    (repo / "util.py").write_text("def slugify(s):\n    return s\n", encoding="utf-8")
+    (repo / "api.py").write_text(
+        "from util import slugify\nfrom core import token\n\n\n"
+        "def route(req):\n    return slugify(token(req))\n",
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], repo)
+    _git(["commit", "-qm", "add callers"], repo)
+
+    # Remove `token` from core.py and all of util.py; api.py still calls both.
+    (repo / "core.py").write_text(
+        "def login(user):\n    check(user)\n    return user\n\n\n"
+        "def check(user):\n    return bool(user)\n",
+        encoding="utf-8",
+    )
+    _git(["rm", "-q", "util.py"], repo)
+    _git(["add", "-A"], repo)
+    _git(["commit", "-qm", "remove"], repo)
+
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db)
+    result = review_range(repo, base="HEAD~1", head="HEAD", db_path=db, max_findings=5)
+    removed = {f.node.name: f for f in result.all_risks if f.node.extra.get("deleted")}
+    assert set(removed) == {"token", "slugify"}, removed
+    assert all(f.severity in ("P0", "P1") for f in removed.values()), removed
+    assert "api.py::route" in removed["slugify"].top_impacted
+    report = format_report(result)
+    assert "was removed but 1 caller(s) still reference it" in report, report
+    payload = web_payload(result)
+    assert any(n.get("deleted") for n in payload["graph"]["nodes"]), "ghost node not rendered"
+
+
+def test_a_removed_function_with_no_callers_is_not_a_finding():
+    repo = _repo_with_change()
+    (repo / "core.py").write_text(
+        "def login(user):\n    return token(user)\n\n\ndef token(user):\n    return user\n",
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], repo)
+    _git(["commit", "-qm", "drop check"], repo)
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db)
+    result = review_range(repo, base="HEAD~1", head="HEAD", db_path=db)
+    assert not [f for f in result.all_risks if f.node.extra.get("deleted")]
+
+
+def test_a_utc_build_is_not_stale_against_an_east_of_utc_commit():
+    """CI builds in UTC; a +03:00 commit made minutes earlier is not newer."""
+    import os
+    import time
+
+    repo = _repo_with_change()
+    env_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime(time.time() - 120))
+        _git(["-c", "user.email=t@t.t", "commit", "-q", "--amend", "--no-edit",
+              "--date", stamp], repo)
+        env = {**os.environ, "GIT_COMMITTER_DATE": time.strftime(
+            "%Y-%m-%dT%H:%M:%S+03:00", time.gmtime(time.time() - 120 + 3 * 3600))}
+        subprocess.run(["git", "commit", "-q", "--amend", "--no-edit"], cwd=repo, env=env, check=True)
+        db = default_db_path(repo)
+        build_graph(repo, db_path=db)
+        result = review_range(repo, base="HEAD~1", head="HEAD", db_path=db)
+        assert not result.stale, result.stale
+    finally:
+        if env_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = env_tz
+        time.tzset()
+
+
+def test_uncommitted_edits_to_reviewed_files_are_flagged():
+    repo = _repo_with_change()
+    with open(repo / "core.py", "a", encoding="utf-8") as fh:
+        fh.write("\n# local edit\n")
+    db = default_db_path(repo)
+    build_graph(repo, db_path=db)
+    result = review_range(repo, base="HEAD~1", head="HEAD", db_path=db)
+    assert result.stale and "uncommitted" in result.stale["message"], result.stale
+    assert "uncommitted" in format_report(result)
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

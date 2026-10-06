@@ -15,6 +15,7 @@ divergences, both aimed at noise:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,6 +48,38 @@ SENSITIVE_PATH_TERMS: frozenset[str] = frozenset({
     "database", "sql", "api",
 })
 
+# Words that start with a security term without being about security.
+# `authorize` must still match `auth`, so this is an exact-word list rather
+# than a ban on the prefix.
+FALSE_FRIENDS: frozenset[str] = frozenset({
+    "author", "authors", "authored", "authoring", "authorship",
+    "signal", "signals", "signaled", "signaling", "signalled", "signalling",
+    "charger", "chargers",
+})
+
+_CAMEL_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
+
+
+def _words(text: str) -> list[str]:
+    """`getAuthToken` / `get_auth_token` / `src/auth-api` -> lowercase words."""
+    return [w.lower() for w in _CAMEL_RE.findall(text)]
+
+
+def _mentions(text: str, terms: frozenset[str]) -> bool:
+    """Does any word of `text` start with a term?
+
+    Word starts, not substrings: `auth` in `author`, `charge` in `discharge`
+    and `sign` in `design` all scored as security surfaces under a substring
+    test — the noise the strong/weak split exists to remove.
+    """
+    return any(
+        word.startswith(term)
+        for word in _words(text)
+        if word not in FALSE_FRIENDS
+        for term in terms
+    )
+
+
 RISK_THRESHOLDS = {"critical": 0.85, "high": 0.70, "medium": 0.40}
 
 
@@ -73,15 +106,23 @@ class RiskFactors:
     callers: float = 0.0
     breadth: float = 0.0
     cross_file: float = 0.0
+    # Removed, but something still calls it: the one breakage that is close
+    # to certain rather than probable.
+    dangling: float = 0.0
 
     def total(self) -> float:
         return min(
             1.0,
-            self.untested + self.security + self.callers + self.breadth + self.cross_file,
+            self.untested + self.security + self.callers + self.breadth
+            + self.cross_file + self.dangling,
         )
 
     def reasons(self) -> list[str]:
         out = []
+        if self.dangling >= 0.60:
+            out.append("removed but still called")
+        elif self.dangling > 0:
+            out.append("removed; a same-named method is still called somewhere")
         if self.untested >= 0.25:
             out.append("no direct test coverage")
         elif self.untested > 0.05:
@@ -130,21 +171,14 @@ def _in_test_file(file_path: str) -> bool:
 
 
 def _security_component(node: GraphNode) -> float:
-    name = node.name.lower()
-    path = node.file_path.lower()
-
-    if any(term in name for term in STRONG_SECURITY_TERMS):
+    if _mentions(node.name, STRONG_SECURITY_TERMS):
         return 0.20
-    if any(term in path for term in STRONG_SECURITY_TERMS):
+    if _mentions(node.file_path, STRONG_SECURITY_TERMS):
         return 0.15
 
-    if any(term in name for term in WEAK_SECURITY_TERMS):
+    if _mentions(node.name, WEAK_SECURITY_TERMS):
         # Generic on its own; meaningful if the path agrees.
-        path_parts = set(Path(path).parts)
-        corroborated = any(
-            term in part for part in path_parts for term in SENSITIVE_PATH_TERMS
-        )
-        return 0.20 if corroborated else 0.05
+        return 0.20 if _mentions(node.file_path, SENSITIVE_PATH_TERMS) else 0.05
 
     return 0.0
 
@@ -212,6 +246,57 @@ def score_symbol(
         impacted_count=impact.get("total_impacted", 0) if impact else 0,
         impacted_files=len(impacted_files),
         top_impacted=[n.qualified_name for n in top],
+    )
+
+
+def score_removed(
+    store: GraphStore,
+    node: GraphNode,
+    callers: list[tuple[GraphNode, bool]],
+) -> ChangedSymbolRisk:
+    """Score a symbol the change removed while callers still reference it.
+
+    Its blast radius is its callers and what reaches them. `callers` comes
+    from unresolved calls, so a bare `foo()` is near-certain breakage, while
+    `x.foo()` may be a third-party object's method and counts for less.
+    """
+    caller_nodes = [c for c, _ in callers]
+    direct = [c for c, weak in callers if not weak]
+    # Only receiver calls: `x.save()` may well be some other class's `save`,
+    # so the reach behind those callers is not evidence either.
+    impact = store.get_impact_radius(
+        seed_qualified_names={c.qualified_name for c in caller_nodes},
+        max_depth=1,
+    ) if direct else {}
+    downstream = impact.get("impacted_nodes", [])
+    impacted_nodes = caller_nodes + [
+        n for n in downstream if n.qualified_name not in {c.qualified_name for c in caller_nodes}
+    ]
+    impacted_files = sorted({n.file_path for n in impacted_nodes})
+
+    factors = RiskFactors(
+        security=_security_component(node),
+        callers=min(len(caller_nodes) / 20.0, 1.0) * 0.10,
+        breadth=min(len(impacted_nodes) / 50.0, 1.0) * 0.15 if direct else 0.0,
+        cross_file=min(len(impacted_files) / 10.0, 1.0) * 0.15 if direct else 0.0,
+        dangling=(0.70 if direct else 0.25) if caller_nodes else 0.0,
+    )
+    total = factors.total()
+    if node.is_test or _in_test_file(node.file_path):
+        total = round(total * 0.5, 3)
+
+    return ChangedSymbolRisk(
+        node=node,
+        score=round(total, 3),
+        level=risk_level(total),
+        severity=severity_for(total),
+        factors=factors,
+        test_count=0,
+        caller_count=len(caller_nodes),
+        impacted_count=len(impacted_nodes),
+        impacted_files=len(impacted_files),
+        # Callers first: they are what actually breaks.
+        top_impacted=[n.qualified_name for n in impacted_nodes if not n.is_test][:5],
     )
 
 
