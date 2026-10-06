@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codebase_rag.graph.build import build_graph  # noqa: E402
-from codebase_rag.graph.diff import map_ranges_to_nodes, parse_diff_ranges  # noqa: E402
+from codebase_rag.graph.diff import map_ranges_to_nodes, parse_diff_ranges, parse_removed_ranges  # noqa: E402
 from codebase_rag.graph.risk import (  # noqa: E402
     _security_component,
     risk_level,
@@ -232,8 +232,36 @@ def test_parse_diff_ranges_handles_deletions():
         "@@ -1,0 +5,2 @@\n"
     )
     ranges = parse_diff_ranges(diff)
-    assert ranges["foo.py"] == [(10, 10)]  # anchored, not skipped
+    # Anchored, not skipped — as (n+1, n), so it overlaps only a symbol that
+    # spans both sides of the removed block.
+    assert ranges["foo.py"] == [(11, 10)]
     assert ranges["bar.py"] == [(5, 6)]
+
+
+def test_a_deleted_file_is_not_attributed_to_the_previous_file():
+    diff = (
+        "--- a/keep.py\n"
+        "+++ b/keep.py\n"
+        "@@ -5,0 +6,2 @@\n"
+        "--- a/gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,40 +0,0 @@\n"
+    )
+    assert parse_diff_ranges(diff) == {"keep.py": [(6, 7)]}
+    assert parse_removed_ranges(diff) == [("gone.py", None, [(1, 40)])]
+
+
+def test_security_terms_match_words_not_substrings():
+    from codebase_rag.graph.risk import _security_component
+
+    def n(name, path="app/x.py"):
+        return GraphNode(kind="Function", name=name, qualified_name=f"{path}::{name}", file_path=path)
+
+    assert _security_component(n("get_author")) == 0.0
+    assert _security_component(n("discharge")) == 0.0
+    assert _security_component(n("design")) == 0.0
+    assert _security_component(n("authorize")) == 0.20
+    assert _security_component(n("getAuthToken")) == 0.20
 
 
 def test_security_term_split():

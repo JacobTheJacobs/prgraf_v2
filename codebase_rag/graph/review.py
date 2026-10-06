@@ -15,8 +15,8 @@ from loguru import logger
 from datetime import datetime
 
 from .constants import MAX_IMPACT_DEPTH, MAX_IMPACT_NODES
-from .diff import WORKTREE, _git, changed_symbols
-from .risk import ChangedSymbolRisk, overall_risk, score_symbol
+from .diff import WORKTREE, _git, changed_symbols, removed_symbols
+from .risk import ChangedSymbolRisk, overall_risk, score_removed, score_symbol
 from .store import GraphStore, default_db_path
 
 MAX_FINDINGS = 3
@@ -63,12 +63,58 @@ def graph_staleness(store: GraphStore, repo_root: Path, head: str) -> dict | Non
     if not stamp:
         return None
     try:
-        committed = datetime.fromisoformat(stamp).replace(tzinfo=None)
+        # The build time is naive local time, so convert the commit into local
+        # time before comparing. Dropping its offset instead read a 23:37+03:00
+        # commit as 23:37 local, which on a UTC CI runner is three hours in the
+        # future — every review there was flagged stale.
+        committed = datetime.fromisoformat(stamp).astimezone().replace(tzinfo=None)
     except ValueError:
         return None
     if committed <= built:
         return None
     return {"graph_built": built_raw, "code_changed": committed.isoformat(timespec="seconds")}
+
+
+def checkout_mismatch(repo_root: Path, head: str, changed_files: list[str]) -> dict | None:
+    """Is the tree on disk — what the graph was built from — not `head`?
+
+    The diff's line numbers come from `head`, the graph's from the files on
+    disk. When those differ, every finding can sit on the wrong symbol, and
+    nothing in the output would say so.
+    """
+    if head == WORKTREE:
+        return None  # the working tree *is* the head
+    head_sha = _git(["rev-parse", "--verify", "--quiet", f"{head}^{{commit}}"], repo_root).strip()
+    checked_out = _git(["rev-parse", "--verify", "--quiet", "HEAD"], repo_root).strip()
+    if head_sha and checked_out and head_sha != checked_out:
+        return {
+            "message": (
+                f"Reviewing {head} ({head_sha[:8]}) but {checked_out[:8]} is checked "
+                f"out; the graph reflects the checkout, so line numbers may not "
+                f"match. Check out {head} and review again."
+            ),
+        }
+    dirty = set(_git(["diff", "--name-only", "HEAD", "--"], repo_root).split())
+    edited = sorted(dirty & set(changed_files))
+    if edited:
+        return {
+            "message": (
+                f"{len(edited)} reviewed file(s) have uncommitted edits "
+                f"({', '.join(edited[:3])}); line numbers may not match {head}. "
+                f"Commit them, or review the uncommitted changes instead."
+            ),
+        }
+    return None
+
+
+def _stale_message(stale: dict) -> str:
+    if "message" in stale:
+        return stale["message"]
+    return (
+        f"Graph built {stale['graph_built']} but code changed "
+        f"{stale['code_changed']}. Findings may point at symbols "
+        f"that have since moved. Call `rebuild` and review again."
+    )
 
 
 @dataclass
@@ -106,11 +152,7 @@ class ReviewResult:
         # the cheap call is exactly the one that must not be told stale
         # findings without knowing they are stale.
         if self.stale:
-            base["warning"] = (
-                f"Graph built {self.stale['graph_built']} but code changed "
-                f"{self.stale['code_changed']}. Findings may point at symbols "
-                f"that have since moved. Call `rebuild` and review again."
-            )
+            base["warning"] = _stale_message(self.stale)
         if detail == "minimal":
             return base
 
@@ -205,15 +247,30 @@ def review_range(
             )
 
         stale = graph_staleness(store, repo_root, head)
-        if stale:
-            logger.warning("Graph is older than the reviewed code: {}", stale)
-
         seeds, ranges = changed_symbols(store, repo_root, base, head)
-        if not seeds:
-            logger.info("No changed symbols found in the graph for this range.")
-            return ReviewResult(changed_files=sorted(ranges), stale=stale)
+        stale = stale or checkout_mismatch(repo_root, head, sorted(ranges))
+        if stale:
+            logger.warning("Graph may not match the reviewed code: {}", stale)
 
-        risks: list[ChangedSymbolRisk] = []
+        # Removed symbols that something still calls. Removals nobody
+        # references are clean deletions and not findings.
+        removed: list[tuple[ChangedSymbolRisk, list]] = []
+        for node in removed_symbols(store, repo_root, base, head):
+            callers = store.unresolved_callers(node.name)
+            if not node.extra.get("method"):
+                # `x.add()` cannot be a call to a removed free function named
+                # `add`; matching it to one flagged every `Set.add` and
+                # `classList.add` in the repo.
+                callers = [(c, weak) for c, weak in callers if not weak]
+            if callers:
+                removed.append((score_removed(store, node, callers), callers))
+        changed_files = sorted(set(ranges) | {r.node.file_path for r, _ in removed})
+
+        if not seeds and not removed:
+            logger.info("No changed symbols found in the graph for this range.")
+            return ReviewResult(changed_files=changed_files, stale=stale)
+
+        risks: list[ChangedSymbolRisk] = [r for r, _ in removed]
         union_scores: dict[str, float] = {}
         truncated = False
 
@@ -237,11 +294,27 @@ def review_range(
             findings = risks[:1] if risks else []
 
         seed_qns = {s.qualified_name for s in seeds}
+        # Removed symbols are not in the store, so their nodes and the edges
+        # from their surviving callers are added by hand.
+        ghost_nodes: list[dict] = []
+        ghost_edges: list[dict] = []
+        for risk, callers in removed:
+            ghost = risk.node.to_dict()
+            ghost["deleted"] = True
+            ghost_nodes.append(ghost)
+            seed_qns.add(risk.node.qualified_name)
+            for caller, _ in callers:
+                union_scores[caller.qualified_name] = 1.0
+                ghost_edges.append({
+                    "id": 0, "kind": "CALLS", "source": caller.qualified_name,
+                    "target": risk.node.qualified_name, "file_path": caller.file_path,
+                    "line": 0, "confidence": 0.5,
+                })
         scope = seed_qns | set(union_scores)
         subgraph = {
             "seeds": sorted(seed_qns),
-            "nodes": [n.to_dict() for n in store._batch_get_nodes(scope)],  # noqa: SLF001
-            "edges": [e.to_dict() for e in store.edges_between(scope)],
+            "nodes": [n.to_dict() for n in store._batch_get_nodes(scope)] + ghost_nodes,  # noqa: SLF001
+            "edges": [e.to_dict() for e in store.edges_between(scope)] + ghost_edges,
             "impact_scores": union_scores,
         }
 
@@ -249,7 +322,7 @@ def review_range(
             findings=findings,
             all_risks=risks,
             overall=overall_risk(risks),
-            changed_files=sorted(ranges),
+            changed_files=changed_files,
             subgraph=subgraph,
             truncated=truncated,
             stale=stale,
@@ -301,6 +374,7 @@ def web_payload(result: ReviewResult, cap: int = 160) -> dict:
                 "symbol": f.node.qualified_name,
                 "name": f.node.name,
                 "kind": f.node.kind,
+                "deleted": bool(f.node.extra.get("deleted")),
                 "severity": f.severity,
                 "level": f.level,
                 "risk": f.score,
@@ -324,6 +398,8 @@ def web_payload(result: ReviewResult, cap: int = 160) -> dict:
 def _stale_line(result: ReviewResult) -> list[str]:
     if not result.stale:
         return []
+    if "message" in result.stale:
+        return [f"! {result.stale['message']}"]
     return [
         f"! Graph built {result.stale['graph_built']}, code changed "
         f"{result.stale['code_changed']} — rebuild before trusting line numbers."
@@ -350,12 +426,19 @@ def format_report(result: ReviewResult) -> str:
     for finding in result.findings:
         node = finding.node
         reasons = ", ".join(finding.factors.reasons()) or "structural change"
-        lines.append(
-            f"- [{finding.severity}] (risk {finding.score:.2f}) "
-            f"`{node.file_path}:{node.line_start}` - `{node.name}` "
-            f"impacts {finding.impacted_count} symbol(s) "
-            f"across {finding.impacted_files} file(s)."
-        )
+        if node.extra.get("deleted"):
+            lines.append(
+                f"- [{finding.severity}] (risk {finding.score:.2f}) "
+                f"`{node.file_path}:{node.line_start}` - `{node.name}` was removed "
+                f"but {finding.caller_count} caller(s) still reference it."
+            )
+        else:
+            lines.append(
+                f"- [{finding.severity}] (risk {finding.score:.2f}) "
+                f"`{node.file_path}:{node.line_start}` - `{node.name}` "
+                f"impacts {finding.impacted_count} symbol(s) "
+                f"across {finding.impacted_files} file(s)."
+            )
         lines.append(f"  {reasons}.")
         if finding.top_impacted:
             preview = ", ".join(qn.split("::")[-1] for qn in finding.top_impacted[:3])

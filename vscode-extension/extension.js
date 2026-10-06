@@ -40,6 +40,49 @@ const LAST_ROOT_KEY = "prgraf.lastRoot";
 /** Sentinel the engine reads as "the working tree", matching diff.WORKTREE. */
 const WORKTREE = "WORKTREE";
 
+/** Same pattern the engine validates refs with (diff._SAFE_GIT_REF). */
+const SAFE_REF = /^[A-Za-z0-9_.~^/@{}\-]+$/;
+
+/** Problem with a base/head pair, or "" when both are safe to use. */
+function refError(base, head) {
+  if (!SAFE_REF.test(base || "")) return `Unsafe base ref: ${JSON.stringify(base)}`;
+  if (head !== WORKTREE && !SAFE_REF.test(head || "")) return `Unsafe head ref: ${JSON.stringify(head)}`;
+  return "";
+}
+
+/** Run bookkeeping. Each review takes a token; only the newest token may
+ *  publish to `last` and the sidebar, so a slow older run (or one started
+ *  before the repo changed) cannot overwrite fresher results. */
+let runSeq = 0;
+let activeRuns = 0;
+
+function beginRun() {
+  activeRuns += 1;
+  return ++runSeq;
+}
+
+function isCurrent(token) {
+  return token === runSeq;
+}
+
+/** Busy means "any run in flight", not "the run that just ended". */
+function endRun() {
+  activeRuns = Math.max(0, activeRuns - 1);
+  if (sidebar) sidebar.update({ busy: activeRuns > 0 });
+}
+
+/** Panels the user closed. Writing to a disposed webview throws. */
+const disposedPanels = new WeakSet();
+
+function trackPanel(panel) {
+  panel.onDidDispose(() => disposedPanels.add(panel));
+  return panel;
+}
+
+function alive(panel) {
+  return !disposedPanels.has(panel);
+}
+
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("prgraf.review", () => runReview(context, false)),
@@ -123,7 +166,9 @@ async function pickRepo(context) {
   await context.workspaceState.update(LAST_ROOT_KEY, dir);
   if (mcpDidChange) mcpDidChange.fire(); // the agent's tools follow the repo
   // A new repo invalidates findings from the old one — showing them under a
-  // different repo name is worse than showing nothing.
+  // different repo name is worse than showing nothing. Bumping the sequence
+  // makes any run still in flight for the old repo stale.
+  runSeq += 1;
   last = { payload: null, root: "", base: "", head: "" };
   sidebar.update({ payload: null, error: "" });
   syncSidebar(context);
@@ -187,6 +232,7 @@ async function pickBase(context) {
     base = await vscode.window.showInputBox({
       prompt: "Base ref to diff against",
       value: vscode.workspace.getConfiguration("prgraf").get("base", "HEAD~1"),
+      validateInput: (v) => (SAFE_REF.test(v) ? "" : "Not a valid git ref"),
     });
     if (!base) return;
   }
@@ -221,30 +267,38 @@ async function sidebarReview(context, baseOverride) {
   const base = baseOverride || cfg.get("base", "HEAD~1");
   const head = cfg.get("head", "HEAD");
 
+  const token = beginRun();
   sidebar.update({ repo: root, busy: true, error: "", payload: null });
-  const result = await runEngine(cfg.get("pythonPath", "python"), root, base, head);
-  if (result.error) {
-    sidebar.update({ busy: false, error: result.error });
-    return;
+  try {
+    const result = await runEngine(cfg.get("pythonPath", "python"), root, base, head);
+    if (!isCurrent(token)) return; // superseded; the newer run owns the view
+    if (result.error) {
+      sidebar.update({ error: result.error });
+      return;
+    }
+    last = { payload: result.payload, root, base, head };
+    sidebar.update({ payload: result.payload, error: "" });
+  } finally {
+    endRun();
   }
-  last = { payload: result.payload, root, base, head };
-  sidebar.update({ busy: false, payload: result.payload, error: "" });
 }
 
 /** Render the last review's graph in a panel, without recomputing it. */
 function openGraphPanel(context) {
   if (!last.payload) {
-    vscode.commands.executeCommand("prgraf.review");
+    // Review the repo the sidebar shows, not whatever detection would pick.
+    runReview(context, false, undefined, currentRoot(context));
     return;
   }
+  const { payload, root } = last;
   const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
-  const webDir = locateWebDir(python, last.root);
-  const panel = vscode.window.createWebviewPanel(
+  const webDir = locateWebDir(python, root);
+  const panel = trackPanel(vscode.window.createWebviewPanel(
     "prgraf.graph",
-    `prgraf · ${path.basename(last.root)}`,
+    `prgraf · ${path.basename(root)}`,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
-  );
+  ));
   if (!webDir) {
     panel.webview.html = errorHtml(
       "prgraf package not found for the configured interpreter.\n" +
@@ -252,8 +306,8 @@ function openGraphPanel(context) {
     );
     return;
   }
-  panel.webview.html = renderHtml(webDir, last.payload);
-  wirePanelMessages(context, panel, last.root);
+  panel.webview.html = renderHtml(webDir, payload);
+  wirePanelMessages(context, panel, root, payload);
 }
 
 /** Let the user pick which chat model narrates — any vendor the editor has. */
@@ -385,9 +439,10 @@ function currentRoot(context) {
 
 /** Hand the review to whichever agent the user picked. */
 async function reviewInChat(context) {
-  const root = await resolveProjectRoot(context, false);
+  // The sidebar's pick wins; detection only runs when nothing is picked yet
+  // (and remembers its own answer), so this never overwrites the selection.
+  const root = currentRoot(context) || (await resolveProjectRoot(context, false));
   if (!root) return;
-  await context.workspaceState.update(LAST_ROOT_KEY, root);
   if (mcpDidChange) mcpDidChange.fire(); // re-resolve the server for this root
 
   const cfg = vscode.workspace.getConfiguration("prgraf");
@@ -401,8 +456,18 @@ async function reviewInChat(context) {
   }
 
   const base = cfg.get("base", "HEAD~1");
+  const head = cfg.get("head", "HEAD");
+  // The prompt reaches a terminal, so refuse anything the engine would too.
+  const bad = refError(base, head);
+  if (bad) {
+    vscode.window.showErrorMessage(`prgraf: ${bad}. Fix prgraf.base / prgraf.head.`);
+    return;
+  }
+  const range = head === WORKTREE
+    ? `the uncommitted changes (working tree vs ${base})`
+    : `${base}..${head}`;
   const prompt =
-    `Review the blast radius of ${base}..HEAD in this repo using the prgraf MCP ` +
+    `Review the blast radius of ${range} in this repo using the prgraf MCP ` +
     `tools. Start with minimal_context; if the risk is not low, call review_diff ` +
     `with detail "standard", then trace_symbol on each finding. Report what could ` +
     `break and what to check first. Keep it under 5 tool calls.`;
@@ -420,9 +485,10 @@ async function reviewInChat(context) {
 
   // CLI agents read project MCP config, so make sure prgraf's tools are there.
   await ensureMcpConfig(root);
-  const terminal = vscode.window.createTerminal({ name: `prgraf · ${agent.label}`, cwd: root });
+  // The agent is launched directly with an argument array — never typed into
+  // a shell — so nothing in the prompt is interpreted.
+  const terminal = vscode.window.createTerminal(agents.terminalOptions(agent, prompt, root));
   terminal.show();
-  terminal.sendText(agent.build(prompt).join(" "));
 }
 
 /** Choose which agent handles the handoff — only offers what is installed. */
@@ -572,10 +638,13 @@ function locateWebDir(python, cwd) {
     const out = cp.execFileSync(
       python,
       ["-c", "import codebase_rag, os; print(os.path.join(os.path.dirname(codebase_rag.__file__), 'web'))"],
-      { cwd, encoding: "utf8" }
+      // An interpreter that hangs on import must not freeze the extension host.
+      { cwd, encoding: "utf8", timeout: 10 * 1000 }
     ).trim();
     if (out && fs.existsSync(out)) return out;
-  } catch (_) { /* fall through */ }
+  } catch (err) {
+    console.warn("prgraf: could not locate web assets", err && err.message);
+  }
   return null;
 }
 
@@ -583,7 +652,7 @@ function locateWebDir(python, cwd) {
 function defaultBranchOf(root) {
   const run = (args) => {
     try {
-      return cp.execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+      return cp.execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 10 * 1000 }).trim();
     } catch (_) {
       return "";
     }
@@ -655,14 +724,20 @@ function runEngine(python, root, base, head, onProgress) {
 }
 
 /** Panel-side actions. Split out so both entry points wire the same handlers. */
-function wirePanelMessages(context, panel, root) {
-  const cfg = vscode.workspace.getConfiguration("prgraf");
+function wirePanelMessages(context, panel, root, payload) {
   panel.webview.onDidReceiveMessage((msg) => {
     if (!msg) return;
     // Explain / hand-off requested from the panel itself, so the LLM review is
     // reachable where the findings are rather than only from the palette.
+    // Explain uses this panel's own payload, and always answers: the webview
+    // is showing "reading the graph…" until it hears back.
     if (msg.type === "explain") {
-      if (last.payload) narrate(panel, last.payload, cfg.get("model", ""));
+      if (payload) {
+        const model = vscode.workspace.getConfiguration("prgraf").get("model", "");
+        narrate(panel, payload, model);
+      } else if (alive(panel)) {
+        panel.webview.postMessage({ type: "summary", text: "", error: "No review to explain yet." });
+      }
       return;
     }
     if (msg.type === "askAgent") {
@@ -673,7 +748,7 @@ function wirePanelMessages(context, panel, root) {
       // HEAD~1 often lands on a config-only commit, which correctly finds
       // nothing. Re-run against the default branch so the panel can show the
       // whole branch's blast radius instead of a dead end.
-      runReview(context, false, defaultBranchOf(root));
+      runReview(context, false, defaultBranchOf(root), root);
       return;
     }
     if (msg.type === "open" && msg.file) {
@@ -682,8 +757,8 @@ function wirePanelMessages(context, panel, root) {
   });
 }
 
-async function runReview(context, forcePick, baseOverride) {
-  const root = await resolveProjectRoot(context, forcePick);
+async function runReview(context, forcePick, baseOverride, rootOverride) {
+  const root = rootOverride || (await resolveProjectRoot(context, forcePick));
   if (!root) return;
   // Remember it so the MCP server (and the agent) target the same project.
   await context.workspaceState.update(LAST_ROOT_KEY, root);
@@ -695,62 +770,77 @@ async function runReview(context, forcePick, baseOverride) {
   const base = baseOverride || cfg.get("base", "HEAD~1");
   const head = cfg.get("head", "HEAD");
 
-  const panel = vscode.window.createWebviewPanel(
+  const panel = trackPanel(vscode.window.createWebviewPanel(
     "prgraf.graph",
     `prgraf · ${path.basename(root)}`,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
-  );
-  panel.webview.html = loadingHtml(path.basename(root));
+  ));
+  // The user may close the panel mid-review; the sidebar still gets the result.
+  const show = (html) => { if (alive(panel)) panel.webview.html = html; };
+  show(loadingHtml(path.basename(root)));
+
+  const token = beginRun();
   if (sidebar) sidebar.update({ repo: root, busy: true, error: "", payload: null });
+  try {
+    const result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `prgraf: reviewing ${path.basename(root)}…` },
+      () =>
+        runEngine(python, root, base, head, (line) => {
+          show(loadingHtml(path.basename(root), line));
+        })
+    );
+    // A stale run still fills its own panel, but leaves `last` and the
+    // sidebar to the newer one.
+    const current = isCurrent(token);
 
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `prgraf: reviewing ${path.basename(root)}…` },
-    () =>
-      runEngine(python, root, base, head, (line) => {
-        panel.webview.html = loadingHtml(path.basename(root), line);
-      })
-  );
+    if (result.error) {
+      show(errorHtml(result.error));
+      if (sidebar && current) sidebar.update({ error: result.error });
+      return;
+    }
 
-  if (result.error) {
-    panel.webview.html = errorHtml(result.error);
-    if (sidebar) sidebar.update({ busy: false, error: result.error });
-    return;
+    const webDir = locateWebDir(python, root);
+    if (!webDir) {
+      const msg =
+        "prgraf package not found for the configured interpreter.\n" +
+        "Run: pip install -e .   (or set prgraf.pythonPath)";
+      show(errorHtml(msg));
+      if (sidebar && current) sidebar.update({ error: msg });
+      return;
+    }
+
+    if (current) {
+      last = { payload: result.payload, root, base, head };
+      if (sidebar) sidebar.update({ payload: result.payload, error: "" });
+    }
+    if (!alive(panel)) return;
+    panel.webview.html = renderHtml(webDir, result.payload);
+    // Narration is additive: the graph is already usable without it.
+    if (cfg.get("summary", true) && (result.payload.findings || []).length) {
+      narrate(panel, result.payload, cfg.get("model", ""));
+    }
+    wirePanelMessages(context, panel, root, result.payload);
+  } finally {
+    endRun();
   }
-
-  const webDir = locateWebDir(python, root);
-  if (!webDir) {
-    const msg =
-      "prgraf package not found for the configured interpreter.\n" +
-      "Run: pip install -e .   (or set prgraf.pythonPath)";
-    panel.webview.html = errorHtml(msg);
-    if (sidebar) sidebar.update({ busy: false, error: msg });
-    return;
-  }
-
-  last = { payload: result.payload, root, base, head };
-  panel.webview.html = renderHtml(webDir, result.payload);
-  if (sidebar) sidebar.update({ busy: false, payload: result.payload, error: "" });
-  // Narration is additive: the graph is already usable without it.
-  if (cfg.get("summary", true) && (result.payload.findings || []).length) {
-    narrate(panel, result.payload, cfg.get("model", ""));
-  }
-  wirePanelMessages(context, panel, root);
 }
 
 /** Ask the language model to explain the already-computed findings, then push
  *  the prose into the panel. Failure is non-fatal — the graph stands alone. */
 function narrate(panel, payload, preferred) {
+  if (!alive(panel)) return;
   const cts = new vscode.CancellationTokenSource();
-  panel.onDidDispose(() => cts.cancel());
+  const sub = panel.onDidDispose(() => cts.cancel());
   panel.webview.postMessage({ type: "summary-pending" });
-  callSummary(vscode, payload, cts.token, preferred).then((res) => {
-    panel.webview.postMessage({
-      type: "summary",
-      text: res.text || "",
-      error: res.error || "",
-    });
-  });
+  const reply = (text, error) => {
+    sub.dispose();
+    if (alive(panel)) panel.webview.postMessage({ type: "summary", text, error });
+  };
+  callSummary(vscode, payload, cts.token, preferred).then(
+    (res) => reply(res.text || "", res.error || ""),
+    (err) => reply("", (err && err.message) || "Summary failed.")
+  );
 }
 
 function deactivate() {}

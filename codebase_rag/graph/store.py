@@ -23,7 +23,8 @@ from .constants import (
     MAX_IMPACT_NODES,
 )
 
-SCHEMA_VERSION = 1
+# 2: unresolved-call table. An older graph has it empty, so it is rebuilt.
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -61,6 +62,17 @@ CREATE TABLE IF NOT EXISTS files (
     updated_at REAL NOT NULL
 );
 
+-- Calls whose target matched no symbol. Kept out of `edges` so they never
+-- bridge the traversal, but they are exactly what a deleted symbol leaves
+-- behind: callers still naming something that no longer exists.
+CREATE TABLE IF NOT EXISTS unresolved (
+    source_qualified TEXT NOT NULL,
+    name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER DEFAULT 0,
+    on_receiver INTEGER DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -74,6 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind);
+CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved(name);
+CREATE INDEX IF NOT EXISTS idx_unresolved_file ON unresolved(file_path);
 """
 
 
@@ -212,6 +226,7 @@ class GraphStore:
         try:
             conn.execute("DELETE FROM nodes WHERE file_path = ?", (file_path,))
             conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
+            conn.execute("DELETE FROM unresolved WHERE file_path = ?", (file_path,))
             if nodes:
                 conn.executemany(
                     "INSERT OR REPLACE INTO nodes "
@@ -257,6 +272,7 @@ class GraphStore:
         try:
             conn.execute("DELETE FROM nodes WHERE file_path = ?", (file_path,))
             conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
+            conn.execute("DELETE FROM unresolved WHERE file_path = ?", (file_path,))
             conn.execute("DELETE FROM files WHERE path = ?", (file_path,))
             conn.execute("COMMIT")
         except Exception:
@@ -323,6 +339,20 @@ class GraphStore:
             (qualified_name, limit),
         ).fetchall()
         return [_row_to_node(r) for r in rows]
+
+    def unresolved_callers(self, name: str, limit: int = 50) -> list[tuple[GraphNode, bool]]:
+        """Symbols that still call `name` although nothing by that name exists.
+
+        Returns (caller, on_receiver) pairs; a receiver call (`x.name()`) is
+        weaker evidence, since the receiver may be a third-party object.
+        """
+        rows = self._conn.execute(
+            "SELECT n.*, MIN(u.on_receiver) AS weak FROM unresolved u "
+            "JOIN nodes n ON n.qualified_name = u.source_qualified "
+            "WHERE u.name = ? GROUP BY n.qualified_name LIMIT ?",
+            (name, limit),
+        ).fetchall()
+        return [(_row_to_node(r), bool(r["weak"])) for r in rows]
 
     def tests_for(self, qualified_name: str, limit: int = 50) -> list[GraphNode]:
         """Tests covering a node.
