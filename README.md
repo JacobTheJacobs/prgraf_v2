@@ -1,105 +1,69 @@
 # prgraf
 
-Low-noise **blast-radius** PR reviewer: what is most likely to break when a PR lands.
+PR reviewer that tells you what is most likely to break when a change lands.
 
-Built on a real code graph — tree-sitter symbol extraction into SQLite, with a
-bounded bidirectional impact traversal. One self-contained app: a CLI (what CI
-runs), a FastAPI web UI with an Obsidian-style blast-radius graph, and an MCP
-server so an agent can review from a token-minimal context packet.
+## How it works
 
-Surfaces:
-- **PR template** — runs on every PR upload (GitHub Actions), posts a comment.
-- **Web UI** — `prgraf-web`, paste a repo + range, see the blast radius; export a
-  self-contained HTML snapshot.
-- **MCP** — `prgraf-mcp`, graph tools with `detail_level` tiering.
+1. **Parse** — [tree-sitter](https://tree-sitter.github.io/) parses every source
+   file into an AST (Python, JS/TS, Go).
+2. **Graph** — functions, classes and files become nodes; calls, imports,
+   inheritance and test coverage become edges. Stored in SQLite.
+3. **Diff** — changed lines are mapped to the symbols that contain them, and
+   removed symbols are found by re-parsing the old side.
+4. **Blast radius** — walk the graph out from each changed symbol (2 hops,
+   weighted by edge type) to find what it reaches.
+5. **Risk** — score each change on test coverage, security-sensitive names,
+   caller count and reach. Report the top 3.
 
-No LLM calls in-product, no vector search, no external graph database. Narration
-is optional and additive — an MCP host agent, or one small editor-model call
-that sees only computed graph facts, never your diff.
+No LLM, no vector DB, no graph database. Deterministic.
 
-## Use as a PR template (recommended)
+## Install
 
-Copy the workflow + this package into any repo once. After that, every PR open/update posts a short review comment.
+```bash
+pip install -e .              # CLI
+pip install -e ".[web,mcp]"   # + web UI and MCP server
+```
 
-See **[template/README.md](template/README.md)** for the full copy steps.
+Requires Python 3.12+.
 
-Quick shape:
+## Use
+
+```bash
+prgraf --base origin/main                 # review this branch
+prgraf --uncommitted --base HEAD          # review uncommitted work
+prgraf --pr https://github.com/o/r/pull/1 # review a GitHub PR
+prgraf --fail-on p1                       # exit 1 on P0/P1 (for CI)
+```
+
+Output:
 
 ```text
-your-repo/
-  .github/workflows/pr-blast-radius.yml
-  tools/prgraf/          ← this package
+Pre-Landing Review: 2 finding(s) · overall risk 0.78 (high)
+- [P1] (risk 0.78) `core.py:10` - `token` was removed but 1 caller(s) still reference it.
+  removed but still called.
+  Check first: route, api.py
+- [P2] (risk 0.56) `core.py:1` - `login` impacts 4 symbol(s) across 3 file(s).
+  no direct test coverage, security- or money-sensitive surface.
 ```
 
-Workflow triggers: `pull_request` → `opened` | `synchronize` | `reopened` | `ready_for_review`.
+## Other surfaces
 
-## CLI (local or CI)
-
-```bash
-pip install -e .
-prgraf --base origin/main --head HEAD
-```
-
-Useful flags:
-
-```bash
-prgraf --base origin/main --head HEAD -o prgraf-report.md
-prgraf --fail-on p1          # exit 1 on P0/P1
-prgraf --quiet               # report only
-```
-
-In GitHub Actions, `GITHUB_BASE_REF` / `GITHUB_WORKSPACE` are picked up automatically when you pass `--base origin/$GITHUB_BASE_REF`.
-
-## Optional web UI
-
-```bash
-pip install -e ".[web]"
-prgraf-web
-# or: uvicorn codebase_rag.api:app --reload
-```
-
-Open `http://localhost:8000` and paste a GitHub PR URL.
-
-## API (web mode)
-
-```bash
-curl -X POST http://localhost:8000/api/analyze \
-  -H "content-type: application/json" \
-  -d '{"repo_url":"https://github.com/org/repo.git","pr_number":123}'
-```
-
-Or pass changes / a local range:
-
-```json
-{"repo_path": ".", "base": "origin/main", "head": "HEAD"}
-```
-
-## Output shape
-
-```text
-Pre-Landing Review: 2 blast-radius finding(s)
-- [P2] (confidence: 8/10) `app/auth.py:1` - `login` changed and is referenced by 3 file(s): ...
-  Review caller contracts first; this is the real runtime blast radius.
-```
+| Surface | Run | What |
+|---|---|---|
+| PR comment | copy [template/](template/README.md) into your repo | GitHub Action, comments on every PR |
+| Web UI | `prgraf-web` → http://localhost:8000 | paste a repo path or PR URL, see the graph |
+| MCP | `prgraf-mcp` | 7 graph tools for an agent |
+| VS Code | [vscode-extension/](vscode-extension/README.md) | same graph inside the editor |
 
 ## Layout
 
 | Path | Role |
-|------|------|
-| `codebase_rag/graph/` | **The engine** — extract, link, impact, risk, review |
-| `codebase_rag/cli.py` | **CLI** — what CI runs |
-| `template/.github/workflows/` | **PR template** workflow |
-| `codebase_rag/api.py` | FastAPI server for the web app |
-| `codebase_rag/web/` | The UI — one renderer, shared by every surface |
-| `codebase_rag/graph/mcp_server.py` | MCP server (7 tools) |
-| `vscode-extension/` | VS Code webview over the same `web/app.js` |
-| `tests/test_graph_engine.py` | Engine tests |
+|---|---|
+| `codebase_rag/graph/` | engine: extract, link, diff, risk, review |
+| `codebase_rag/cli.py` | CLI |
+| `codebase_rag/api.py`, `web/` | web server and UI |
+| `vscode-extension/` | VS Code extension |
+| `template/` | GitHub Actions workflow |
+| `tests/` | `python -m pytest tests` |
 
-## Verify
-
-```bash
-python -m py_compile codebase_rag/cli.py codebase_rag/api.py codebase_rag/graph/*.py
-python tests/test_graph_engine.py               # 11 engine tests
-prgraf --repo . --base HEAD~1 --quiet           # real review
-prgraf-web                                      # UI on http://localhost:8000
-```
+Design notes: [architecture.md](architecture.md).
