@@ -27,6 +27,11 @@ Remove-Item -Recurse -Force "$target\tools\prgraf\temp_repos" -ErrorAction Silen
 
 2. Commit and push. Next PR open/sync will post a **Blast-Radius PR Review** comment.
 
+Every run also writes the report to the job summary and uploads it as the
+`prgraf-report` artifact. PRs from forks get a read-only token, so they skip the
+comment and rely on those two. Comments longer than GitHub's limit are truncated
+with a link to the artifact.
+
 ## Local dry-run (before push)
 
 From the repo under review (with `prgraf` installed or `PYTHONPATH` set):

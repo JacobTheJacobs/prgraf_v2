@@ -94,7 +94,21 @@ NOISY_CALLEES = frozenset({
     "console", "require", "make", "new", "append", "len", "cap", "panic", "recover",
 })
 
-_TEST_PATH_HINTS = ("test", "spec", "__tests__")
+# Directory names that mark everything below them as test code. Matched on
+# whole path segments: `inspector/` or `latest/` must not count as tests.
+_TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs"})
+_TEST_FILE_SUFFIXES = (
+    "_test.py", "_test.go",
+    ".test.ts", ".test.js", ".test.tsx", ".test.jsx", ".test.mjs", ".test.cjs",
+)
+
+# Signature-only declarations (TS overloads). A later declaration with a body
+# under the same qualified name replaces the signature's node.
+_SIGNATURE_TYPES = frozenset({"function_signature", "method_signature"})
+
+# Receivers that refer to the enclosing object, not a module or variable the
+# link pass could resolve through imports.
+_SELF_RECEIVERS = frozenset({"self", "cls"})
 
 # Marks a CALLS edge as `x.foo()` rather than `foo()`. link.py uses it to
 # decide how much evidence is needed before binding the name to a symbol.
@@ -127,22 +141,57 @@ def _name_of(node, source: bytes) -> str | None:
 
 
 def _is_test_path(file_path: str) -> bool:
-    lowered = file_path.lower()
-    name = Path(lowered).name
+    parts = Path(file_path.lower().replace("\\", "/")).parts
+    if not parts:
+        return False
+    name = parts[-1]
     return (
         name.startswith("test_")
-        or name.endswith(("_test.py", "_test.go", ".test.ts", ".test.js", ".spec.ts", ".spec.js"))
-        or any(hint in lowered for hint in _TEST_PATH_HINTS)
+        or name == "conftest.py"
+        or name.endswith(_TEST_FILE_SUFFIXES)
+        or ".spec." in name
+        or any(part in _TEST_DIR_NAMES for part in parts[:-1])
     )
 
 
-def _callee_name(call_node, source: bytes, language: str) -> tuple[str, bool] | None:
-    """Callee name at a call site, plus whether it was called on a receiver.
+def _receiver_name(func, source: bytes) -> str | None:
+    """`x` in `x.foo()` when x is a plain identifier, else None.
 
-    Returns `(name, on_receiver)`. `foo()` is a bare call; `x.foo()` is a call
-    on a receiver, and we do not know x's type. That distinction matters at
-    link time: `classList.add(...)` must not bind to some unrelated top-level
-    `add` just because the names match.
+    The link pass binds `mod.f()` / Go `pkg.F()` through the file's imports,
+    so only a bare name is useful. `self.x()`, `this.x()` and chained or
+    computed objects (`a.b.c()`, `f().g()`) yield None.
+    """
+    obj = func.child_by_field_name("object") or func.child_by_field_name("operand")
+    if obj is None or obj.type != "identifier":
+        return None
+    text = _text(obj, source)
+    return None if text in _SELF_RECEIVERS else text
+
+
+def _go_receiver_type(node, source: bytes) -> str | None:
+    """`A` for `func (a *A[T]) m()`: receiver type, pointer/generics stripped."""
+    receiver = node.child_by_field_name("receiver")
+    if receiver is None:
+        return None
+    stack = [receiver]
+    while stack:
+        cur = stack.pop()
+        if cur.type == "type_identifier":
+            return _text(cur, source)
+        stack.extend(reversed(cur.named_children))
+    return None
+
+
+def _callee_name(
+    call_node, source: bytes, language: str
+) -> tuple[str, bool, str | None] | None:
+    """Callee name at a call site, whether it was called on a receiver, and
+    the receiver's name when it is a plain identifier.
+
+    Returns `(name, on_receiver, receiver)`. `foo()` is a bare call; `x.foo()`
+    is a call on a receiver, and we do not know x's type. That distinction
+    matters at link time: `classList.add(...)` must not bind to some unrelated
+    top-level `add` just because the names match.
     """
     func = call_node.child_by_field_name("function") or call_node.child_by_field_name(
         "constructor"
@@ -150,7 +199,7 @@ def _callee_name(call_node, source: bytes, language: str) -> tuple[str, bool] | 
     if func is None:
         return None
     if func.type in ("identifier", "type_identifier"):
-        return _text(func, source), False
+        return _text(func, source), False, None
     # attribute / member_expression / selector_expression
     attr = (
         func.child_by_field_name("attribute")
@@ -158,11 +207,11 @@ def _callee_name(call_node, source: bytes, language: str) -> tuple[str, bool] | 
         or func.child_by_field_name("field")
     )
     if attr is not None:
-        return _text(attr, source), True
+        return _text(attr, source), True, _receiver_name(func, source)
     if func.named_child_count:
         last = func.named_children[-1]
         if last.type in ("identifier", "property_identifier", "field_identifier"):
-            return _text(last, source), True
+            return _text(last, source), True, None
     return None
 
 
@@ -177,6 +226,12 @@ def _import_targets(node, source: bytes, language: str) -> list[str]:
             for child in node.named_children:
                 if child.type in ("dotted_name", "relative_import"):
                     out.append(_text(child, source))
+                elif child.type == "aliased_import":
+                    # `import a.b as c`: the module is `a.b`; link derives
+                    # the alias from the path, so it is not recorded here.
+                    name = child.child_by_field_name("name")
+                    if name is not None:
+                        out.append(_text(name, source))
     else:
         source_field = node.child_by_field_name("source") or node.child_by_field_name("path")
         if source_field is not None:
@@ -226,12 +281,19 @@ def extract_file(
     ]
     edges: list[GraphEdge] = []
     seen_qns: set[str] = {file_qn}
+    # qualified name -> index in `nodes`, for signature-only nodes that a
+    # later implementation may replace.
+    signature_nodes: dict[str, int] = {}
 
     def qualify(name: str, parent: str | None) -> str:
         return f"{file_path}::{parent}.{name}" if parent else f"{file_path}::{name}"
 
     def walk(node, scope_qn: str, scope_name: str | None) -> None:
-        """Depth-first walk carrying the enclosing symbol as scope."""
+        """Depth-first walk carrying the enclosing symbol as scope.
+
+        `scope_name` is the enclosing symbol's full in-file dotted path
+        (`A.run`), so `f"{file_path}::{scope_name}"` is its qualified name.
+        """
         for child in node.named_children:
             kind = None
             name = None
@@ -246,29 +308,39 @@ def extract_file(
                 kind, name = "Function", _name_of(child, source)
 
             if kind and name:
-                qn = qualify(name, scope_name)
-                if qn in seen_qns:
-                    # Overloads / redefinitions share a qualified name; the
-                    # UNIQUE index would reject the second insert.
-                    walk(child, qn, name)
-                    continue
-                seen_qns.add(qn)
+                parent = scope_name
+                if child.type == "method_declaration" and language == "go":
+                    # Go methods live at file level; scope them by receiver
+                    # type so `(a *A) Close` and `(b *B) Close` don't collide.
+                    parent = _go_receiver_type(child, source) or scope_name
+                path = f"{parent}.{name}" if parent else name
+                qn = qualify(name, parent)
                 is_test = is_test_file and (
                     name.startswith("test") or name.startswith("Test") or "should" in name
                 )
-                nodes.append(
-                    GraphNode(
-                        kind="Test" if is_test else kind,
-                        name=name,
-                        qualified_name=qn,
-                        file_path=file_path,
-                        line_start=child.start_point[0] + 1,
-                        line_end=child.end_point[0] + 1,
-                        language=language,
-                        parent_name=scope_name,
-                        is_test=is_test,
-                    )
+                node = GraphNode(
+                    kind="Test" if is_test else kind,
+                    name=name,
+                    qualified_name=qn,
+                    file_path=file_path,
+                    line_start=child.start_point[0] + 1,
+                    line_end=child.end_point[0] + 1,
+                    language=language,
+                    parent_name=parent,
+                    is_test=is_test,
                 )
+                if qn in seen_qns:
+                    # Overloads / redefinitions share a qualified name; the
+                    # UNIQUE index would reject the second insert. A TS
+                    # implementation replaces the overload signature before it.
+                    if qn in signature_nodes and child.type not in _SIGNATURE_TYPES:
+                        nodes[signature_nodes.pop(qn)] = node
+                    walk(child, qn, path)
+                    continue
+                seen_qns.add(qn)
+                if child.type in _SIGNATURE_TYPES:
+                    signature_nodes[qn] = len(nodes)
+                nodes.append(node)
                 edges.append(
                     GraphEdge(
                         kind="CONTAINS",
@@ -296,12 +368,12 @@ def extract_file(
                                     confidence=0.5,
                                 )
                             )
-                walk(child, qn, name)
+                walk(child, qn, path)
                 continue
 
             if child.type in spec.calls:
                 found = _callee_name(child, source, language)
-                callee, on_receiver = found if found else (None, False)
+                callee, on_receiver, receiver = found if found else (None, False, None)
                 if callee and callee not in NOISY_CALLEES and len(callee) > 2:
                     edges.append(
                         GraphEdge(
@@ -313,6 +385,7 @@ def extract_file(
                             # The link pass reads this back: a receiver call is
                             # weaker evidence and gets resolved more strictly.
                             confidence=RECEIVER_CALL_CONFIDENCE if on_receiver else 0.5,
+                            receiver=receiver,
                         )
                     )
                 walk(child, scope_qn, scope_name)

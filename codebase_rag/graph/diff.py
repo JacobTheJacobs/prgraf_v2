@@ -17,7 +17,8 @@ from loguru import logger
 from .store import GraphNode, GraphStore
 
 # Refs reach subprocess, so validate before they ever get there.
-_SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
+# No leading `-`: git would read `--output=<file>` or `--cached` as an option.
+_SAFE_GIT_REF = re.compile(r"^(?!-)[A-Za-z0-9_.~^/@{}\-]+$")
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _FILE_RE = re.compile(r"^\+\+\+ (?:b/(.+)|/dev/null)$")
@@ -30,7 +31,7 @@ class UnsafeRefError(ValueError):
     """A ref failed validation and was never passed to git."""
 
 
-def _validate_ref(ref: str) -> str:
+def validate_ref(ref: str) -> str:
     if not ref or not _SAFE_GIT_REF.match(ref):
         raise UnsafeRefError(f"unsafe git ref: {ref!r}")
     return ref
@@ -124,16 +125,16 @@ WORKTREE = "WORKTREE"
 
 def _diff_text(repo_root: Path, base: str, head: str) -> tuple[str, str]:
     """(diff, old-side commit) for base...head, or base vs the working tree."""
-    _validate_ref(base)
+    validate_ref(base)
 
     if head == WORKTREE:
         # Uncommitted work, staged and unstaged. The graph is built from the
         # same files on disk, so line numbers line up.
         return _git(["diff", "--unified=0", "-M", base, "--"], repo_root), base
 
-    _validate_ref(head)
+    validate_ref(head)
     merge_base = _git(["merge-base", base, head], repo_root).strip() or base
-    _validate_ref(merge_base)
+    validate_ref(merge_base)
     diff = _git(["diff", "--unified=0", "-M", f"{merge_base}...{head}", "--"], repo_root)
     return diff, merge_base
 

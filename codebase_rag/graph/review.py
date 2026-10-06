@@ -15,7 +15,7 @@ from loguru import logger
 from datetime import datetime
 
 from .constants import MAX_IMPACT_DEPTH, MAX_IMPACT_NODES
-from .diff import WORKTREE, _git, changed_symbols, removed_symbols
+from .diff import WORKTREE, _git, changed_symbols, removed_symbols, validate_ref
 from .risk import ChangedSymbolRisk, overall_risk, score_removed, score_symbol
 from .store import GraphStore, default_db_path
 
@@ -59,7 +59,7 @@ def graph_staleness(store: GraphStore, repo_root: Path, head: str) -> dict | Non
             return None
         return {"graph_built": built_raw, "code_changed": max(mtimes).isoformat(timespec="seconds")}
 
-    stamp = _git(["log", "-1", "--format=%cI", head], repo_root).strip()
+    stamp = _git(["log", "-1", "--format=%cI", validate_ref(head)], repo_root).strip()
     if not stamp:
         return None
     try:
@@ -236,6 +236,10 @@ def review_range(
 ) -> ReviewResult:
     """Review a git range against an already-built graph."""
     repo_root = Path(repo_root).resolve()
+    # Before anything runs git: the staleness check passes `head` to git log.
+    validate_ref(base)
+    if head != WORKTREE:
+        validate_ref(head)
     store = GraphStore(db_path or default_db_path(repo_root))
 
     try:

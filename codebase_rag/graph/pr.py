@@ -108,8 +108,11 @@ def _origin_matches(repo_path: Path, pr: PRRef) -> bool:
     url = _git(["remote", "get-url", "origin"], repo_path).stdout.strip().lower()
     if not url:
         return False
-    normalized = url.replace("\\", "/").replace(":", "/").removesuffix(".git")
-    return f"{pr.owner}/{pr.repo}".lower() in normalized
+    normalized = url.replace("\\", "/").replace(":", "/").rstrip("/").removesuffix(".git")
+    # Exact owner/repo, not a substring: `owner/repo` is inside
+    # `evilowner/repo-fork`, and a match here force-checks-out the user's tree.
+    parts = normalized.split("/")
+    return parts[-2:] == [pr.owner.lower(), pr.repo.lower()]
 
 
 def _is_dirty(repo_path: Path) -> bool:
@@ -188,9 +191,20 @@ def prepare_pr(
             f"could not fetch {pr.slug}: {fetched.stderr.strip() or 'is it private, or does it exist?'}"
         )
 
+    # The base side moves too. Without this a reused clone computes the
+    # merge-base against whatever origin/main was at its last fetch, and
+    # everything merged since reads as part of the PR.
+    refreshed = _git(["fetch", "--quiet", "origin"], repo_path)
+    if refreshed.returncode != 0:
+        logger.warning(f"could not refresh origin for {pr.slug}: {refreshed.stderr.strip()}")
+
     # A stacked PR's real base is another branch, which only the GitHub API
     # knows; assuming the default branch would fold the parent PR's changes
     # into this review. base_override exists for that case.
+    if base_override:
+        from .diff import validate_ref
+
+        validate_ref(base_override)
     reference = base_override or _default_branch(repo_path)
     merge_base = _git(["merge-base", reference, head_ref], repo_path).stdout.strip()
     base = merge_base or reference

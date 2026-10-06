@@ -54,21 +54,44 @@ function refError(base, head) {
  *  publish to `last` and the sidebar, so a slow older run (or one started
  *  before the repo changed) cannot overwrite fresher results. */
 let runSeq = 0;
-let activeRuns = 0;
+/** Bumped when the repo changes; runs from an older epoch never count as busy. */
+let runEpoch = 0;
+/** token -> { epoch, controller } for every engine run still in flight. */
+const inFlight = new Map();
 
 function beginRun() {
-  activeRuns += 1;
-  return ++runSeq;
+  const token = ++runSeq;
+  inFlight.set(token, { epoch: runEpoch, controller: new AbortController() });
+  return token;
 }
 
 function isCurrent(token) {
   return token === runSeq;
 }
 
-/** Busy means "any run in flight", not "the run that just ended". */
-function endRun() {
-  activeRuns = Math.max(0, activeRuns - 1);
-  if (sidebar) sidebar.update({ busy: activeRuns > 0 });
+/** Abort signal for a run, so a repo change can kill its engine process. */
+function runSignal(token) {
+  const run = inFlight.get(token);
+  return run ? run.controller.signal : undefined;
+}
+
+/** Busy means "a run for the current repo is in flight", not "the run that
+ *  just ended" — and not a run abandoned by a repo change. */
+function isBusy() {
+  for (const run of inFlight.values()) if (run.epoch === runEpoch) return true;
+  return false;
+}
+
+function endRun(token) {
+  inFlight.delete(token);
+  if (sidebar) sidebar.update({ busy: isBusy() });
+}
+
+/** Repo changed: make every in-flight run stale and kill its engine. */
+function abandonRuns() {
+  runSeq += 1;
+  runEpoch += 1;
+  for (const run of inFlight.values()) run.controller.abort();
 }
 
 /** Panels the user closed. Writing to a disposed webview throws. */
@@ -167,10 +190,11 @@ async function pickRepo(context) {
   if (mcpDidChange) mcpDidChange.fire(); // the agent's tools follow the repo
   // A new repo invalidates findings from the old one — showing them under a
   // different repo name is worse than showing nothing. Bumping the sequence
-  // makes any run still in flight for the old repo stale.
-  runSeq += 1;
+  // makes any run still in flight for the old repo stale, and killing its
+  // engine frees the sidebar for the new repo now rather than in 5 minutes.
+  abandonRuns();
   last = { payload: null, root: "", base: "", head: "" };
-  sidebar.update({ payload: null, error: "" });
+  sidebar.update({ payload: null, error: "", busy: false });
   syncSidebar(context);
 }
 
@@ -270,7 +294,9 @@ async function sidebarReview(context, baseOverride) {
   const token = beginRun();
   sidebar.update({ repo: root, busy: true, error: "", payload: null });
   try {
-    const result = await runEngine(cfg.get("pythonPath", "python"), root, base, head);
+    const result = await runEngine(
+      cfg.get("pythonPath", "python"), root, base, head, undefined, runSignal(token)
+    );
     if (!isCurrent(token)) return; // superseded; the newer run owns the view
     if (result.error) {
       sidebar.update({ error: result.error });
@@ -279,7 +305,7 @@ async function sidebarReview(context, baseOverride) {
     last = { payload: result.payload, root, base, head };
     sidebar.update({ payload: result.payload, error: "" });
   } finally {
-    endRun();
+    endRun(token);
   }
 }
 
@@ -350,27 +376,16 @@ async function writeMcpConfig(context) {
 
   let existing = {};
   if (fs.existsSync(target)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(target, "utf8"));
-    } catch (_) {
+    existing = readMcpJson(target);
+    if (!existing) {
       const overwrite = await vscode.window.showWarningMessage(
-        `${target} exists but is not valid JSON. Overwrite?`, "Overwrite", "Cancel"
+        `${target} exists but is not a valid MCP config object. Overwrite?`, "Overwrite", "Cancel"
       );
       if (overwrite !== "Overwrite") return;
+      existing = {};
     }
   }
-  const merged = {
-    ...existing,
-    mcpServers: {
-      ...(existing.mcpServers || {}),
-      prgraf: {
-        command: python,
-        args: ["-m", "codebase_rag.graph.mcp_server"],
-        env: { PRGRAF_REPO: root },
-      },
-    },
-  };
-  fs.writeFileSync(target, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  fs.writeFileSync(target, JSON.stringify(withPrgrafServer(existing, python, root), null, 2) + "\n", "utf8");
   const open = await vscode.window.showInformationMessage(
     `prgraf: wrote ${path.basename(target)} — agents reading project MCP config can now use the graph tools.`,
     "Open"
@@ -511,23 +526,27 @@ async function chooseAgent() {
   vscode.window.showInformationMessage(`prgraf agent: ${pick.label}`);
 }
 
-/** Write .mcp.json if absent so CLI agents can see the graph tools. */
-async function ensureMcpConfig(root) {
-  const target = path.join(root, ".mcp.json");
-  let existing = {};
-  if (fs.existsSync(target)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(target, "utf8"));
-    } catch (_) {
-      return; // malformed and not ours to fix silently
-    }
-    if (existing.mcpServers && existing.mcpServers.prgraf) return;
+/** Parsed .mcp.json when it is a JSON object (with an object mcpServers, if
+ *  any), else null. `null`, arrays and scalars are valid JSON but not configs. */
+function readMcpJson(target) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(target, "utf8"));
+  } catch (_) {
+    return null;
   }
-  const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
-  const merged = {
-    ...existing,
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!isObj(data)) return null;
+  if (data.mcpServers !== undefined && !isObj(data.mcpServers)) return null;
+  return data;
+}
+
+/** `config` with prgraf's server added; every other server is kept as is. */
+function withPrgrafServer(config, python, root) {
+  return {
+    ...config,
     mcpServers: {
-      ...(existing.mcpServers || {}),
+      ...(config.mcpServers || {}),
       prgraf: {
         command: python,
         args: ["-m", "codebase_rag.graph.mcp_server"],
@@ -535,7 +554,28 @@ async function ensureMcpConfig(root) {
       },
     },
   };
-  fs.writeFileSync(target, JSON.stringify(merged, null, 2) + "\n", "utf8");
+}
+
+/** Write .mcp.json if absent so CLI agents can see the graph tools. An
+ *  existing file may be committed, and the entry holds machine-absolute paths,
+ *  so changing one is the user's call, never silent. */
+async function ensureMcpConfig(root) {
+  const target = path.join(root, ".mcp.json");
+  const python = vscode.workspace.getConfiguration("prgraf").get("pythonPath", "python");
+  if (!fs.existsSync(target)) {
+    fs.writeFileSync(target, JSON.stringify(withPrgrafServer({}, python, root), null, 2) + "\n", "utf8");
+    return;
+  }
+  const existing = readMcpJson(target);
+  if (!existing) return; // malformed and not ours to fix silently
+  if (existing.mcpServers && existing.mcpServers.prgraf) return;
+  const add = await vscode.window.showWarningMessage(
+    `prgraf: add a prgraf server to ${target}? It records this machine's ` +
+    `Python and repo paths, so avoid committing it.`,
+    "Add", "Skip"
+  );
+  if (add !== "Add") return;
+  fs.writeFileSync(target, JSON.stringify(withPrgrafServer(existing, python, root), null, 2) + "\n", "utf8");
 }
 
 function isProject(dir) {
@@ -666,12 +706,17 @@ function defaultBranchOf(root) {
 }
 
 /**
- * Run the engine once. Resolves to {payload} or {error} — never throws, and
- * never touches a view, so the sidebar and the graph panel share exactly one
- * implementation of "review this range".
+ * Run the engine once. Resolves to {payload} or {error} — never throws or
+ * rejects, and never touches a view, so the sidebar and the graph panel share
+ * exactly one implementation of "review this range". `signal` aborts the
+ * engine process (the repo changed under it).
  */
-function runEngine(python, root, base, head, onProgress) {
+function runEngine(python, root, base, head, onProgress, signal) {
   return new Promise((resolve) => {
+    if (!python) {
+      resolve({ error: "prgraf.pythonPath is empty. Set it to a Python interpreter with prgraf installed." });
+      return;
+    }
     const args = [
       "-m", "codebase_rag.graph.export_cli",
       "--repo", root, "--base", base, "--head", head,
@@ -681,36 +726,49 @@ function runEngine(python, root, base, head, onProgress) {
       maxBuffer: 64 * 1024 * 1024,
       // Never hang forever: a runaway index should surface, not spin.
       timeout: 5 * 60 * 1000,
+      signal,
     };
-    const child = cp.execFile(python, args, opts, (err, stdout, stderr) => {
-      if (err && err.killed) {
-        resolve({
-          error:
-            "Timed out after 5 minutes.\n\nThis folder may be larger than expected. " +
-            "Pick a specific project with the Repo field.",
-        });
-        return;
-      }
-      if (err && !stdout) {
-        resolve({ error: `Engine failed.\n\n${stderr || err.message}` });
-        return;
-      }
-      let payload;
-      try {
-        payload = JSON.parse(stdout);
-      } catch (e) {
-        resolve({ error: `Could not parse engine output.\n\n${stderr || String(e)}` });
-        return;
-      }
-      if (payload.status === "error") {
-        resolve({ error: payload.message || "Review failed." });
-        return;
-      }
-      payload.repo = root;
-      payload.base = base;
-      payload.head = head;
-      resolve({ payload });
-    });
+    let child;
+    try {
+      child = cp.execFile(python, args, opts, (err, stdout, stderr) => {
+        if (signal && signal.aborted) {
+          resolve({ error: "Review cancelled: the repository changed." });
+          return;
+        }
+        if (err && err.killed) {
+          resolve({
+            error:
+              "Timed out after 5 minutes.\n\nThis folder may be larger than expected. " +
+              "Pick a specific project with the Repo field.",
+          });
+          return;
+        }
+        if (err && !stdout) {
+          resolve({ error: `Engine failed.\n\n${stderr || err.message}` });
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(stdout);
+        } catch (e) {
+          resolve({ error: `Could not parse engine output.\n\n${stderr || String(e)}` });
+          return;
+        }
+        if (!payload || typeof payload !== "object" || payload.status === "error") {
+          resolve({ error: (payload && payload.message) || "Review failed." });
+          return;
+        }
+        payload.repo = root;
+        payload.base = base;
+        payload.head = head;
+        resolve({ payload });
+      });
+    } catch (err) {
+      // execFile throws synchronously on a bad command/option (e.g. a
+      // non-string pythonPath); without this the caller waits forever.
+      resolve({ error: `Could not start the engine (${python}).\n\n${(err && err.message) || err}` });
+      return;
+    }
 
     // The engine logs progress to stderr; echo the latest line so a long
     // build reads as working, not frozen.
@@ -788,7 +846,7 @@ async function runReview(context, forcePick, baseOverride, rootOverride) {
       () =>
         runEngine(python, root, base, head, (line) => {
           show(loadingHtml(path.basename(root), line));
-        })
+        }, runSignal(token))
     );
     // A stale run still fills its own panel, but leaves `last` and the
     // sidebar to the newer one.
@@ -822,7 +880,7 @@ async function runReview(context, forcePick, baseOverride, rootOverride) {
     }
     wirePanelMessages(context, panel, root, result.payload);
   } finally {
-    endRun();
+    endRun(token);
   }
 }
 

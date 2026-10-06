@@ -12,7 +12,7 @@ from pathlib import Path
 from loguru import logger
 
 from codebase_rag.graph.build import build_graph
-from codebase_rag.graph.diff import WORKTREE
+from codebase_rag.graph.diff import WORKTREE, validate_ref
 from codebase_rag.graph.review import format_report, review_range
 from codebase_rag.graph.store import default_db_path
 
@@ -69,6 +69,7 @@ def _git(args: list[str], repo: Path) -> subprocess.CompletedProcess:
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
+    validate_ref(ref)
     return _git(["rev-parse", "--verify", ref], repo).returncode == 0
 
 

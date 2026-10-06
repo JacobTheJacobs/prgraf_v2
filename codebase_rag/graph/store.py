@@ -23,8 +23,10 @@ from .constants import (
     MAX_IMPACT_NODES,
 )
 
-# 2: unresolved-call table. An older graph has it empty, so it is rebuilt.
-SCHEMA_VERSION = 2
+# 2: unresolved-call table. 3: call receivers, full nested qualified names.
+# An older graph lacks what an incremental build never backfills, so it is
+# rebuilt in full.
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -52,6 +54,8 @@ CREATE TABLE IF NOT EXISTS edges (
     file_path TEXT NOT NULL,
     line INTEGER DEFAULT 0,
     confidence REAL DEFAULT 1.0,
+    receiver TEXT,                   -- `mod` in `mod.f()`, when a bare name
+    on_receiver INTEGER DEFAULT 0,   -- set by the link pass: was `x.f()`
     updated_at REAL NOT NULL
 );
 
@@ -70,7 +74,8 @@ CREATE TABLE IF NOT EXISTS unresolved (
     name TEXT NOT NULL,
     file_path TEXT NOT NULL,
     line INTEGER DEFAULT 0,
-    on_receiver INTEGER DEFAULT 0
+    on_receiver INTEGER DEFAULT 0,
+    receiver TEXT
 );
 
 CREATE TABLE IF NOT EXISTS metadata (
@@ -130,6 +135,9 @@ class GraphEdge:
     file_path: str
     line: int = 0
     confidence: float = 1.0
+    # For a call on a plain identifier (`auth.verify()`), that identifier.
+    # Lets the link pass bind module/package calls through the file's imports.
+    receiver: str | None = None
     id: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -175,6 +183,7 @@ def _row_to_edge(row: sqlite3.Row) -> GraphEdge:
         file_path=row["file_path"],
         line=row["line"] or 0,
         confidence=row["confidence"] if row["confidence"] is not None else 1.0,
+        receiver=row["receiver"] if "receiver" in row.keys() else None,
     )
 
 
@@ -194,10 +203,34 @@ class GraphStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._drop_if_outdated()
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.execute(
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
+        )
+
+    def _drop_if_outdated(self) -> None:
+        """Discard a graph from an older schema; the next build is a full one.
+
+        `CREATE TABLE IF NOT EXISTS` never adds columns, so an old graph would
+        otherwise fail on its first insert. The graph is a cache of the source
+        tree, so dropping it loses nothing a build cannot recreate.
+        """
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'"
+        ).fetchone()
+        if row is None:
+            return
+        version = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+        if version is not None and version["value"] == str(SCHEMA_VERSION):
+            return
+        self._conn.executescript(
+            "DROP TABLE IF EXISTS nodes; DROP TABLE IF EXISTS edges; "
+            "DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS unresolved; "
+            "DELETE FROM metadata;"
         )
 
     def close(self) -> None:
@@ -247,11 +280,11 @@ class GraphStore:
                 conn.executemany(
                     "INSERT INTO edges "
                     "(kind, source_qualified, target_qualified, file_path, line, "
-                    " confidence, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    " confidence, receiver, updated_at) VALUES (?,?,?,?,?,?,?,?)",
                     [
                         (
                             e.kind, e.source_qualified, e.target_qualified,
-                            e.file_path, e.line, e.confidence, now,
+                            e.file_path, e.line, e.confidence, e.receiver, now,
                         )
                         for e in edges
                     ],

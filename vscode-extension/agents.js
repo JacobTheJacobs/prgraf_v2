@@ -6,6 +6,8 @@
  *  repo with this prompt". No vendor is special-cased. */
 
 const cp = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 const AGENTS = [
   { id: "vscode", label: "VS Code chat", bin: null, args: null },
@@ -22,12 +24,18 @@ function psQuote(text) {
   return `'${String(text).replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
 }
 
+/** Shell script for POSIX terminals: run the agent from its positional args
+ *  ("$@" — never parsed as shell text), then keep the terminal open, so a
+ *  one-shot agent (gemini -p, opencode run) leaves its output readable. */
+const POSIX_RUNNER =
+  '"$@"; status=$?; echo; echo "[agent exited $status]"; exec "${SHELL:-/bin/sh}"';
+
 /**
  * Terminal options that start `agent` with `prompt` as one argument.
  *
- * No text is ever typed into a shell. On POSIX the agent binary IS the
- * terminal process, args passed as an array. On Windows the CLIs are usually
- * .cmd shims that need a shell, so PowerShell runs a quoted call sent as
+ * No text is ever typed into a shell. On POSIX /bin/sh runs a fixed script
+ * and the agent plus its args arrive as positional parameters. On Windows the
+ * CLIs are usually npm shims, so PowerShell runs a quoted call sent as
  * -EncodedCommand (base64 UTF-16LE), which nothing re-parses on the way in.
  */
 function terminalOptions(agent, prompt, cwd) {
@@ -37,16 +45,43 @@ function terminalOptions(agent, prompt, cwd) {
   const text = String(prompt).replace(/\r?\n/g, " ").replace(/"/g, "'");
   const args = agent.args(text);
   if (process.platform === "win32") {
-    // Bare name: PowerShell's own lookup honours PATHEXT, whereas `where`
-    // lists npm's extensionless sh shim first.
-    const script = `& ${[agent.bin, ...args].map(psQuote).join(" ")}`;
+    const script = `& ${[windowsCommand(agent.bin), ...args].map(psQuote).join(" ")}`;
     return {
       name, cwd,
       shellPath: "powershell.exe",
-      shellArgs: ["-NoLogo", "-NoExit", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      // Bypass covers a .ps1 we could not avoid; process scope only, and a
+      // Group Policy setting still wins — hence preferring the .cmd shim.
+      shellArgs: [
+        "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass",
+        "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64"),
+      ],
     };
   }
-  return { name, cwd, shellPath: locate(agent.bin), shellArgs: args };
+  return {
+    name, cwd,
+    shellPath: "/bin/sh",
+    // "prgraf" is $0; the agent binary and its args are $1.. and run as "$@".
+    shellArgs: ["-c", POSIX_RUNNER, "prgraf", locate(agent.bin), ...args],
+  };
+}
+
+/** What PowerShell should invoke for `bin`. A bare name resolves npm's
+ *  claude.ps1 first, which the default ExecutionPolicy blocks, so use the
+ *  .cmd/.exe `where` finds, or the .cmd shim sitting next to the sh shim. */
+function windowsCommand(bin) {
+  let hits;
+  try {
+    hits = cp.execFileSync("where", [bin], { encoding: "utf8", timeout: 5000 })
+      .split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  } catch (_) {
+    return bin;
+  }
+  if (!hits.length) return bin;
+  const runnable = hits.find((h) => /\.(cmd|bat|exe)$/i.test(h));
+  if (runnable) return runnable;
+  const parsed = path.win32.parse(hits[0]);
+  const shim = path.win32.join(parsed.dir, `${parsed.name}.cmd`);
+  return fs.existsSync(shim) ? shim : bin;
 }
 
 /** Absolute path of `bin` when `which` finds one, else the bare name. */
@@ -92,4 +127,4 @@ function resolve(preferred) {
   return found.find((a) => a.bin) || found[0] || null;
 }
 
-module.exports = { AGENTS, available, byId, resolve, isOnPath, terminalOptions, psQuote };
+module.exports = { AGENTS, available, byId, resolve, isOnPath, terminalOptions, psQuote, windowsCommand };
